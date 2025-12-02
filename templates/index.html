@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>E-IPM Secure Authentication Client</title>
-    <!-- Load Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         body { 
@@ -41,18 +40,13 @@
             MFA & RBAC with Intrusion Prevention (IPS)
         </p>
         
-        <!-- Server Status Indicator -->
         <div id="server-status" class="text-center text-xs p-2 rounded-lg mb-4 hidden"></div>
 
-        <!-- Dynamic Content Area -->
         <div id="auth-flow-container">
-            <!-- Login/Registration UI will be injected here -->
-        </div>
+            </div>
 
-        <!-- Message/Status Display -->
         <div id="message-box" class="mt-6 p-4 rounded-lg text-sm transition duration-300 hidden" role="alert"></div>
 
-        <!-- Dashboard (Protected Routes) -->
         <div id="dashboard-container" class="mt-8 pt-6 border-t border-gray-200 hidden">
             <h2 class="text-xl font-bold mb-4 text-gray-800 flex items-center">
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5 mr-2 text-green-600">
@@ -91,8 +85,8 @@
 
     <script>
         // --- Core Variables ---
-        // IMPORTANT: The Flask server is running on localhost:5000.
-        const API_BASE_URL = 'http://127.0.0.1:5000'; 
+        // CHANGED: Use relative path since Flask serves this file, preventing CORS issues.
+        const API_BASE_URL = ''; 
         let currentToken = null;
         let currentUserRole = null;
         let currentUsername = null; 
@@ -103,13 +97,15 @@
             const statusBox = document.getElementById('server-status');
             statusBox.classList.remove('hidden', 'bg-red-100', 'text-red-800', 'bg-green-100', 'text-green-800');
             statusBox.classList.add(isOk ? 'bg-green-100' : 'bg-red-100', isOk ? 'text-green-800' : 'text-red-800');
-            statusBox.textContent = isOk ? '✅ Server Status: Running (http://127.0.0.1:5000)' : '❌ Server Status: OFFLINE. Please run "python app.py"';
+            // Updated text to reflect potential live URL, but still mention local for context
+            statusBox.textContent = isOk ? '✅ Server Status: Running (Local or Deployed)' : '❌ Server Status: OFFLINE. Please run "python app.py" or check deployment status.';
         }
         
         async function checkServerStatus() {
             try {
-                const response = await fetch(API_BASE_URL + '/');
-                setServerStatus(response.ok);
+                // Check connectivity to the root API path
+                const response = await fetch(API_BASE_URL + '/register', { method: 'OPTIONS' });
+                setServerStatus(response.ok || response.status === 405); // 405 is fine for OPTIONS check
             } catch (error) {
                 setServerStatus(false);
             }
@@ -190,7 +186,6 @@
             clearMessage();
             
             document.getElementById('auth-flow-container').innerHTML = `
-                <!-- Form uses onsubmit to prevent default browser GET submission -->
                 <form id="login-form" onsubmit="event.preventDefault(); handleLogin();" class="space-y-4">
                     <input type="text" id="login_username" placeholder="Username (e.g., admin, finance, user1)" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" autocomplete="username" required>
                     <input type="password" id="login_password" placeholder="Password (securepassword)" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" autocomplete="current-password" required>
@@ -210,17 +205,14 @@
         }
 
         function renderRegisterUI() {
+            // Note: The backend ignores the role and forces 'admin' for demo simplicity
              document.getElementById('auth-flow-container').innerHTML = `
                 <h2 class="text-2xl font-bold text-center text-gray-700 mb-4">Register New Account</h2>
                 <form id="register-form" onsubmit="event.preventDefault(); handleRegister();" class="space-y-4">
                     <input type="text" id="reg_username" placeholder="New Username" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" required>
                     <input type="password" id="reg_password" placeholder="Password" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" required>
                     <input type="email" id="reg_email" placeholder="Email Address" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" required>
-                    <select id="reg_role" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500">
-                        <option value="user">User (Standard)</option>
-                        <option value="finance">Finance (Test RBAC)</option>
-                        <option value="admin">Admin (Test RBAC)</option>
-                    </select>
+                    <p class="text-xs text-gray-500">Note: Backend currently forces role to 'admin' for new users for easy demo access.</p>
                     
                     <button type="submit" class="w-full py-3 px-4 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold transition duration-150 shadow-md">
                         Register
@@ -266,10 +258,12 @@
             const username = document.getElementById('reg_username').value;
             const password = document.getElementById('reg_password').value;
             const email = document.getElementById('reg_email').value;
-            const role = document.getElementById('reg_role').value;
+            // Removed role selection input from DOM as backend forces 'admin'
+            // const role = document.getElementById('reg_role').value; 
 
             try {
-                const data = await apiFetch('/register', 'POST', { username, password, email, role });
+                // Pass role as a dummy value or omit it, as the backend overrides it.
+                const data = await apiFetch('/register', 'POST', { username, password, email, role: 'user' }); 
                 showMessage(data.message, false);
                 renderLoginUI();
             } catch (error) {
@@ -344,7 +338,6 @@
                         if (log.level === 'CRITICAL' || log.level === 'ALERT') color = 'text-red-400';
 
                         // Escape log.message before injecting into innerHTML to prevent XSS.
-                        // We use innerHTML here to apply color formatting to the timestamp/type.
                         const escapedMessage = escapeHtml(log.message);
 
                         return `<span class="${color}">[${time} | ${log.type}]</span> ${escapedMessage}`;
