@@ -77,16 +77,18 @@ class SecurityLog(db.Model):
 
 def log_security_event(level, message, log_type):
     """Adds an entry to the SecurityLog table."""
-    source_ip = request.remote_addr if request else 'N/A'
-    
-    log = SecurityLog(
-        level=level, 
-        message=message, 
-        source_ip=source_ip, 
-        log_type=log_type
-    )
-    db.session.add(log)
-    db.session.commit()
+    # Ensure this runs within the app context
+    with app.app_context():
+        source_ip = request.remote_addr if request else 'N/A'
+        
+        log = SecurityLog(
+            level=level, 
+            message=message, 
+            source_ip=source_ip, 
+            log_type=log_type
+        )
+        db.session.add(log)
+        db.session.commit()
 
 def generate_jwt_token(user):
     """Generates an access token with user data and role."""
@@ -172,7 +174,6 @@ def check_rate_limit(username=None):
         SecurityLog.timestamp >= time_window
     ).count()
 
-    # NOTE: Block occurs when count hits the MAX_LOGIN_ATTEMPTS (i.e., the 5th attempt is blocked)
     if ip_failures >= app.config['MAX_LOGIN_ATTEMPTS']:
         log_security_event('ALERT', f'Rate Limit Triggered. IP {source_ip} blocked.', 'RATE_LIMIT_IP')
         return True
@@ -192,34 +193,43 @@ def check_rate_limit(username=None):
 
     return False
 
-# --- Database Initialization Function ---
+# --- Database Initialization Function (Exported for setup.py) ---
 
 def create_db_and_users():
-    """Creates the database and adds initial users."""
-    db.drop_all() # Good for ephemeral demo environment
+    """
+    Initializes the database and adds initial users.
+    NOTE: This function is called from setup.py and will ONLY create users 
+    if the database is currently empty to prevent slowdowns.
+    """
+    # Check if the tables exist and are populated
+    # We must create all tables before querying if they don't exist yet
     db.create_all()
-
-    # Create default users
-    if User.query.filter_by(username='admin').first() is None:
+    
+    if User.query.first() is None:
+        # ⚠️ Only drop tables if you are doing a full reset. 
+        # For a clean start, db.create_all() is sufficient if the file doesn't exist.
+        # For this demo, let's ensure it's clean if it's empty
+        
+        # Create default users
         admin_user = User(username='admin', email='admin@demo.com', role='admin')
         admin_user.set_password('securepassword')
         db.session.add(admin_user)
         print("Default Admin user created: admin/securepassword")
-        
-    if User.query.filter_by(username='finance').first() is None:
+            
         finance_user = User(username='finance', email='finance@demo.com', role='finance')
         finance_user.set_password('securepassword')
         db.session.add(finance_user)
         print("Default Finance user created: finance/securepassword")
-        
-    if User.query.filter_by(username='user1').first() is None:
+            
         standard_user = User(username='user1', email='user1@demo.com', role='user')
         standard_user.set_password('securepassword')
         db.session.add(standard_user)
         print("Default Standard user created: user1/securepassword")
 
-    db.session.commit()
-    log_security_event('INFO', 'Database initialized and default users created.', 'SYSTEM_INIT')
+        db.session.commit()
+        log_security_event('INFO', 'Database initialized and default users created.', 'SYSTEM_INIT')
+    else:
+        print("Database already populated. Skipping initial user setup.")
 
 
 # --- Application Routes ---
@@ -228,6 +238,34 @@ def create_db_and_users():
 def index():
     """Serves the main HTML client (index.html)."""
     return render_template('index.html') 
+
+@app.route('/register', methods=['POST'])
+def register():
+    """Registers a new user."""
+    data = request.get_json()
+    username = data.get('username')
+    password = data.get('password')
+    email = data.get('email')
+
+    if not all([username, password, email]):
+        return jsonify({'message': 'Missing required fields.'}), 400
+
+    if User.query.filter_by(username=username).first():
+        return jsonify({'message': 'User already exists.'}), 409
+
+    new_user = User(username=username, email=email, role='user')
+    new_user.set_password(password)
+    
+    try:
+        db.session.add(new_user)
+        db.session.commit()
+        log_security_event('INFO', f'New user registered: {username}', 'REGISTRATION_SUCCESS')
+        return jsonify({'message': f'User {username} registered successfully! You can now log in.'}), 201
+    except Exception as e:
+        db.session.rollback()
+        log_security_event('ERROR', f'Registration failed for {username}: {str(e)}', 'REGISTRATION_FAILURE')
+        return jsonify({'message': 'Registration failed due to a server error.'}), 500
+
 
 @app.route('/login', methods=['POST'])
 def login():
@@ -241,6 +279,7 @@ def login():
 
     # IPS Check: Block if rate limit is exceeded
     if check_rate_limit(username):
+        log_security_event('ALERT', f'Login attempt blocked for {username} due to IPS rate limit.', 'AUTH_BLOCKED')
         return jsonify({'message': 'Too many failed login attempts. Account temporarily locked (Rate Limit).'}), 429
 
     user = User.query.filter_by(username=username).first()
@@ -347,3 +386,14 @@ def get_security_logs():
     } for log in logs]
 
     return jsonify(log_list), 200
+
+# --- Application Runner ---
+
+if __name__ == '__main__':
+    # When running locally, ensure the database exists, but don't reset it on every restart.
+    with app.app_context():
+        # This will create tables if they don't exist, but skip creating users if they do.
+        db.create_all() 
+        print("Database tables ensured to exist.")
+
+    app.run(debug=True)
