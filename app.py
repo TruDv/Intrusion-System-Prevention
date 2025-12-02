@@ -1,61 +1,61 @@
-import json
 import os
-import random
-import string
+import json
 import time
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
-from flask import Flask, jsonify, request
+# Database and Server Imports
+from flask import Flask, request, jsonify, g, render_template
+from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
+
+# Security Imports
 from werkzeug.security import generate_password_hash, check_password_hash
+import jwt
+import secrets 
 
 # --- Configuration ---
-# Set the environment variable for security, though not strictly required for this demo
-os.environ['FLASK_SECRET_KEY'] = 'a_very_secret_key_for_jwt_signing'
-
 class Config:
-    """Application configuration settings."""
-    # NOTE: In a real application, use a more robust, external database (e.g., PostgreSQL).
-    SQLALCHEMY_DATABASE_URI = 'sqlite:///security_model.db'
+    # Database Configuration
+    SQLALCHEMY_DATABASE_URI = 'sqlite:///intrusion_system.db'
     SQLALCHEMY_TRACK_MODIFICATIONS = False
-    SECRET_KEY = os.environ.get('FLASK_SECRET_KEY', 'a_default_secret_key_if_env_not_set')
-    JWT_EXPIRATION_MINUTES = 60
     
-    # Intrusion Prevention Settings
-    MAX_LOGIN_ATTEMPTS = 5 # Brute force prevention limit (per IP/user)
-    RATE_LIMIT_WINDOW_SECONDS = 60 # Time window for rate limiting
+    # Security Configuration
+    # NOTE: Set a secure, long string in Render's Environment Variables (SECRET_KEY)
+    SECRET_KEY = os.environ.get('SECRET_KEY', 'default_strong_secret_key_for_demonstrator_only') 
+    JWT_ALGORITHM = 'HS256'
+    JWT_EXPIRY_DAYS = 7
     
-    # Anomaly Detection Settings (Velocity Check)
-    MAX_AUTHENTICATED_REQUESTS = 15 # Max requests per user in the anomaly window
-    ANOMALY_CHECK_WINDOW_SECONDS = 30 # Time window for velocity checks
+    # MFA Settings
+    MFA_CODE_EXPIRY_SECONDS = 300 # 5 minutes
     
-# Signature Blacklist (Simulating Known Attack Patterns for Signature-Based WAF)
-KNOWN_MALICIOUS_SIGNATURES = [
-    "SELECT * FROM users", # SQL Injection
-    "UNION ALL",           # SQL Injection
-    "DROP TABLE",          # SQL Injection
-    "<SCRIPT>",            # Cross-Site Scripting (XSS)
-    "CMD.EXE",             # OS Command Injection
-    "../",                 # Path Traversal
-    "1=1"                  # SQL Injection
-]
+    # Intrusion Prevention (Rate Limiter) Settings
+    MAX_LOGIN_ATTEMPTS = 5 # Blocks on the 5th failure
+    RATE_LIMIT_WINDOW_SECONDS = 60 # Window to track failures (60 seconds)
 
+# --- Flask App Initialization ---
 app = Flask(__name__)
 app.config.from_object(Config)
+
+# Enable CORS 
+CORS(app)
+
+# Database Initialization
 db = SQLAlchemy(app)
 
 # --- Database Models ---
 
 class User(db.Model):
-    """Represents an application user with auth and MFA details."""
+    """Stores user accounts, roles, and MFA data."""
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
     password_hash = db.Column(db.String(128), nullable=False)
-    role = db.Column(db.String(20), default='user') # Roles: admin, finance, user
-    login_failures = db.Column(db.Integer, default=0) # For brute force counter
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    role = db.Column(db.String(20), default='user')
+    
+    # MFA Fields
     mfa_code = db.Column(db.String(6), nullable=True)
-    mfa_code_expiry = db.Column(db.DateTime(timezone=True), nullable=True) # Stored with timezone info
+    mfa_code_expiry = db.Column(db.DateTime, nullable=True)
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
@@ -64,480 +64,286 @@ class User(db.Model):
         return check_password_hash(self.password_hash, password)
 
 class SecurityLog(db.Model):
-    """Records all security events for monitoring and audit trail."""
+    """Logs system events, failures, and security anomalies."""
     id = db.Column(db.Integer, primary_key=True)
-    timestamp = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    level = db.Column(db.String(10)) # INFO, WARNING, ALERT, CRITICAL
-    event_type = db.Column(db.String(30)) # AUTH_SUCCESS, AUTH_FAILURE, RATE_LIMIT, AUTHZ_FAILURE, SIGNATURE_MATCH, VELOCITY_ANOMALY
-    message = db.Column(db.Text)
-    username = db.Column(db.String(80), nullable=True)
-    source_ip = db.Column(db.String(50))
-    path = db.Column(db.String(255))
+    # Always store timestamps as UTC
+    timestamp = db.Column(db.DateTime, default=datetime.now(timezone.utc)) 
+    level = db.Column(db.String(20))
+    message = db.Column(db.String(500))
+    source_ip = db.Column(db.String(45), nullable=True)
+    log_type = db.Column(db.String(50))
 
-    def to_dict(self):
-        return {
-            'id': self.id,
-            'timestamp': self.timestamp.isoformat(),
-            'level': self.level,
-            'event_type': self.event_type,
-            'message': self.message,
-            'username': self.username,
-            'source_ip': self.source_ip,
-            'path': self.path
-        }
+# --- Helper Functions ---
 
-# --- Utility Functions ---
-
-def log_security_event(level, event_type, message, username=None):
-    """Helper function to log a security event."""
-    # Get client IP address
-    ip = get_client_ip()
+def log_security_event(level, message, log_type):
+    """Adds an entry to the SecurityLog table."""
+    source_ip = request.remote_addr if request else 'N/A'
     
-    # Store the log in the database
-    new_log = SecurityLog(
-        level=level,
-        event_type=event_type,
-        message=message,
-        username=username,
-        source_ip=ip,
-        path=request.path
+    log = SecurityLog(
+        level=level, 
+        message=message, 
+        source_ip=source_ip, 
+        log_type=log_type
     )
-    db.session.add(new_log)
-    # Commit is handled inside the decorator or route to ensure transactional integrity
+    db.session.add(log)
     db.session.commit()
 
-def get_client_ip():
-    """Safely retrieves the client's IP address, accounting for proxies."""
-    # In a production environment, configure the trusted proxy count properly.
-    if request.headers.getlist("X-Forwarded-For"):
-        # The true client IP is usually the first address in the list
-        return request.headers.getlist("X-Forwarded-For")[0]
-    return request.remote_addr
-
-# JWT and Authentication logic (Simplified, without external library)
-
-def create_jwt(user_id, role, username):
-    """
-    Creates a simple, *UNSIGNED* JWT for demonstration purposes.
-    CRITICAL: In a real-world application, this MUST be cryptographically 
-    signed (e.g., using python-jose or PyJWT) to prevent forgery.
-    """
-    header = {"alg": "HS256", "typ": "JWT"}
+def generate_jwt_token(user):
+    """Generates an access token with user data and role."""
+    now = datetime.now(timezone.utc)
     payload = {
-        "user_id": user_id,
-        "role": role,
-        "username": username,
-        # Expiration time is a timestamp for easy comparison
-        "exp": (datetime.now(timezone.utc) + timedelta(minutes=app.config['JWT_EXPIRATION_MINUTES'])).timestamp()
+        'exp': now + timedelta(days=app.config['JWT_EXPIRY_DAYS']),
+        'iat': now,
+        'username': user.username,
+        'user_id': user.id,
+        'role': user.role
     }
-    return json.dumps({"header": header, "payload": payload}) 
+    
+    token = jwt.encode(
+        payload, 
+        app.config['SECRET_KEY'], 
+        algorithm=app.config['JWT_ALGORITHM']
+    )
+    return token
 
-def decode_jwt(token):
-    """Decodes and validates the simplified JWT."""
-    try:
-        data = json.loads(token)
-        payload = data.get('payload')
-        if not payload:
-            return None
-            
-        # 1. Check expiration time (Offset-Aware comparison)
-        now = datetime.now(timezone.utc).timestamp()
-        if payload.get("exp") < now:
-            return None # Token expired
-            
-        # 2. Return payload
-        return payload
-    except Exception:
-        return None
+def token_required(roles=[]):
+    """Decorator to protect routes and enforce Role-Based Access Control (RBAC)."""
+    def decorator(f):
+        @wraps(f)
+        def decorated(*args, **kwargs):
+            token = None
+            if 'Authorization' in request.headers:
+                auth_header = request.headers['Authorization']
+                if auth_header.startswith('Bearer '):
+                    token = auth_header.split(' ')[1]
 
-# --- Security Decorators ---
+            if not token:
+                log_security_event('WARNING', 'Access attempt without token.', 'AUTHZ_FAILURE')
+                return jsonify({'message': 'Authorization Token is missing!'}), 401
+            
+            try:
+                data = jwt.decode(
+                    token, 
+                    app.config['SECRET_KEY'], 
+                    algorithms=[app.config['JWT_ALGORITHM']]
+                )
+                current_user = User.query.filter_by(username=data['username']).first()
+                
+                if current_user is None:
+                    log_security_event('CRITICAL', f'Invalid token (user {data.get("username", "Unknown")} not found).', 'AUTHZ_FAILURE')
+                    return jsonify({'message': 'Token user not found.'}), 401
+
+                # Role Check (RBAC enforcement)
+                if roles and current_user.role not in roles:
+                    log_security_event(
+                        'CRITICAL', 
+                        f'RBAC Violation: User {current_user.username} (Role: {current_user.role}) attempted unauthorized access to a protected resource.', 
+                        'AUTHZ_FAILURE'
+                    )
+                    return jsonify({'message': 'Insufficient privileges for this resource (RBAC Violation).'}), 403
+
+            except jwt.ExpiredSignatureError:
+                log_security_event('WARNING', 'Access attempt with expired token.', 'AUTHZ_FAILURE')
+                return jsonify({'message': 'Token has expired.'}), 401
+            except jwt.InvalidTokenError:
+                log_security_event('CRITICAL', 'Access attempt with invalid token.', 'AUTHZ_FAILURE')
+                return jsonify({'message': 'Token is invalid.'}), 401
+            except Exception as e:
+                log_security_event('ERROR', f'Token processing error: {str(e)}', 'AUTHZ_FAILURE')
+                return jsonify({'message': 'Token processing error.'}), 401
+
+            g.current_user = current_user
+            return f(*args, **kwargs)
+        return decorated
+    return decorator
 
 def check_rate_limit(username=None):
-    """Intrusion Prevention: Checks for brute force login attempts."""
-    ip = get_client_ip()
-    now = datetime.now(timezone.utc)
-    time_window = now - timedelta(seconds=app.config['RATE_LIMIT_WINDOW_SECONDS'])
-
-    # 1. Check IP-based brute force (any user)
+    """
+    Checks if a login attempt is rate-limited based on failure history for the IP or username.
+    Returns True if rate-limited (blocked), False otherwise.
+    """
+    source_ip = request.remote_addr
+    time_window = datetime.now(timezone.utc) - timedelta(seconds=app.config['RATE_LIMIT_WINDOW_SECONDS'])
+    
+    # 1. Check IP-based failures (all users from this IP)
     ip_failures = SecurityLog.query.filter(
-        SecurityLog.source_ip == ip,
-        SecurityLog.event_type == 'AUTH_FAILURE',
-        SecurityLog.timestamp > time_window
+        SecurityLog.log_type == 'AUTH_FAILURE',
+        SecurityLog.source_ip == source_ip,
+        SecurityLog.timestamp >= time_window
     ).count()
 
+    # NOTE: Block occurs when count hits the MAX_LOGIN_ATTEMPTS (i.e., the 5th attempt is blocked)
     if ip_failures >= app.config['MAX_LOGIN_ATTEMPTS']:
-        log_security_event('ALERT', 'RATE_LIMIT', f'IP rate limit hit: {ip_failures} failures.', username=username)
-        return False, f"Too many login attempts from this IP address. Please wait {app.config['RATE_LIMIT_WINDOW_SECONDS']} seconds."
-
-    # 2. Check Username-based lockout (specific user)
+        log_security_event('ALERT', f'Rate Limit Triggered. IP {source_ip} blocked.', 'RATE_LIMIT_IP')
+        return True
+    
+    # 2. Check Username-based failures (specific user lockout)
     if username:
         user_failures = SecurityLog.query.filter(
-            SecurityLog.username == username,
-            SecurityLog.event_type == 'AUTH_FAILURE',
-            SecurityLog.timestamp > time_window
+            SecurityLog.log_type == 'AUTH_FAILURE',
+            # Search message for the username to find relevant failures
+            SecurityLog.message.like(f'%User: {username}%'), 
+            SecurityLog.timestamp >= time_window
         ).count()
         
         if user_failures >= app.config['MAX_LOGIN_ATTEMPTS']:
-            log_security_event('CRITICAL', 'ACCOUNT_LOCKOUT', f'Account lockout triggered for user: {username}', username=username)
-            return False, f"Too many failed attempts for this account. Account temporarily locked. Please wait {app.config['RATE_LIMIT_WINDOW_SECONDS']} seconds."
-            
-    return True, None
+            log_security_event('ALERT', f'Rate Limit Triggered. Username {username} blocked.', 'RATE_LIMIT_USER')
+            return True
 
+    return False
 
-def waf_signature_check(f):
-    """Intrusion Prevention: Signature-Based Detection (Web Application Firewall Model)."""
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        
-        # Get all request data (JSON body, form data, URL arguments)
-        data_to_check = []
-        
-        # 1.1 Check JSON body
-        try:
-            if request.is_json:
-                # Use request.get_data(as_text=True) for raw string data inspection
-                data_to_check.append(request.get_data(as_text=True) or "")
-        except Exception:
-            pass
-        
-        # 1.2 Check Form data
-        if request.form:
-            data_to_check.append(json.dumps(request.form.to_dict()))
-            
-        # 1.3 Check URL query parameters
-        if request.args:
-            data_to_check.append(json.dumps(request.args.to_dict()))
+# --- Database Initialization Function ---
 
-        all_data = " ".join(data_to_check).upper()
-
-        for signature in KNOWN_MALICIOUS_SIGNATURES:
-            if signature.upper() in all_data:
-                # Attack detected! Block immediately.
-                username = getattr(request, 'current_user', {}).get('username', 'UNAUTH')
-                log_security_event('CRITICAL', 'SIGNATURE_MATCH', 
-                                   f'Blocked request containing malicious signature: "{signature}"', 
-                                   username=username)
-                return jsonify({'message': 'Access Denied: Malicious signature detected (Signature-Based Prevention).'}), 403
-
-        return f(*args, **kwargs)
-    return decorated
-
-
-def velocity_anomaly_check(f):
-    """Anomaly Detection: Checks the rate of successful authenticated requests for a user."""
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        current_user = getattr(request, 'current_user', None)
-        
-        # This check is only relevant if the user token was successfully decoded
-        if current_user:
-            username = current_user.get('username')
-            now = datetime.now(timezone.utc)
-            time_window_start = now - timedelta(seconds=app.config['ANOMALY_CHECK_WINDOW_SECONDS'])
-
-            # Query the log for the authenticated user's requests within the window
-            recent_requests = SecurityLog.query.filter(
-                SecurityLog.username == username,
-                # Include successful log events that track legitimate activity
-                SecurityLog.event_type.in_(['AUTHZ_SUCCESS']), 
-                SecurityLog.timestamp > time_window_start
-            ).count()
-
-            if recent_requests >= app.config['MAX_AUTHENTICATED_REQUESTS']:
-                # Anomaly detected! Block access to prevent data exfiltration.
-                log_security_event('ALERT', 'VELOCITY_ANOMALY', 
-                                   f'User {username} triggered velocity anomaly: {recent_requests} requests in {app.config["ANOMALY_CHECK_WINDOW_SECONDS"]}s.', 
-                                   username=username)
-                return jsonify({'message': 'Access Denied: Detected abnormal request velocity (Anomaly-Based Prevention).'}), 403
-                
-            # Log the successful request that passed all checks for the anomaly calculation
-            # This request itself must be logged so it counts towards the next velocity check
-            log_security_event('INFO', 'AUTHZ_SUCCESS', f'Authenticated request accepted for user {username}.', username=username)
-
-        # If all checks pass, proceed to the original function
-        return f(*args, **kwargs)
-    return decorated
-
-
-def token_required(roles=None):
-    """
-    Wrapper for all protected routes:
-    1. Decodes and validates JWT.
-    2. Performs Role-Based Access Control (RBAC).
-    """
-    def wrapper(f):
-        @wraps(f)
-        def decorated(*args, **kwargs):
-            token = request.headers.get('Authorization')
-            if not token or not token.startswith('Bearer '):
-                return jsonify({'message': 'Authentication required. Token missing or invalid format.'}), 401
-
-            token = token.split(' ')[1]
-            current_user = decode_jwt(token)
-            
-            if not current_user:
-                return jsonify({'message': 'Authentication failed. Token invalid or expired.'}), 401
-
-            # Attach user info to the request object for use by other checks/routes 
-            # (Velocity Check, which runs after this decorator)
-            request.current_user = current_user
-            
-            # --- 3. Role-Based Access Control (Authorization) ---
-            if roles and current_user.get('role') not in roles:
-                log_security_event('CRITICAL', 'AUTHZ_FAILURE', 
-                                   f'User {current_user.get("username")} (Role: {current_user.get("role")}) attempted unauthorized access to {request.path}.', 
-                                   username=current_user.get('username'))
-                return jsonify({'message': 'Authorization Failed: Insufficient role permissions (RBAC).'}), 403
-            
-            return f(*args, **kwargs)
-        return decorated
-    return wrapper
-
-# --- Initialization ---
-
-with app.app_context():
+def create_db_and_users():
+    """Creates the database and adds initial users."""
+    db.drop_all() # Good for ephemeral demo environment
     db.create_all()
 
-    # Create dummy admin user if not exists
-    if not User.query.filter_by(username='admin').first():
-        admin = User(username='admin', role='admin')
-        admin.set_password('adminpass123')
-        db.session.add(admin)
+    # Create default users
+    if User.query.filter_by(username='admin').first() is None:
+        admin_user = User(username='admin', email='admin@demo.com', role='admin')
+        admin_user.set_password('securepassword')
+        db.session.add(admin_user)
+        print("Default Admin user created: admin/securepassword")
         
-    # Create dummy finance user if not exists
-    if not User.query.filter_by(username='finance').first():
-        finance = User(username='finance', role='finance')
-        finance.set_password('financepass')
-        db.session.add(finance)
+    if User.query.filter_by(username='finance').first() is None:
+        finance_user = User(username='finance', email='finance@demo.com', role='finance')
+        finance_user.set_password('securepassword')
+        db.session.add(finance_user)
+        print("Default Finance user created: finance/securepassword")
         
-    # Create dummy standard user if not exists
-    if not User.query.filter_by(username='user1').first():
-        user1 = User(username='user1', role='user')
-        user1.set_password('userpass')
-        db.session.add(user1)
-        
-    db.session.commit()
-    print("Database initialized and dummy users created: admin, finance, user1.")
+    if User.query.filter_by(username='user1').first() is None:
+        standard_user = User(username='user1', email='user1@demo.com', role='user')
+        standard_user.set_password('securepassword')
+        db.session.add(standard_user)
+        print("Default Standard user created: user1/securepassword")
 
-# --- Routes ---
+    db.session.commit()
+    log_security_event('INFO', 'Database initialized and default users created.', 'SYSTEM_INIT')
+
+
+# --- Application Routes ---
 
 @app.route('/', methods=['GET'])
 def index():
-    """Application welcome message and instructions."""
-    return jsonify({
-        "message": "Welcome to the Enhanced Intrusion Prevention Model Demo Backend.",
-        "endpoints": [
-            "/register", "/login", "/verify-mfa",
-            "/data/user-profile (user+)",
-            "/data/finance-report (finance+)",
-            "/data/admin-report (admin only)",
-            "/data/high-value-asset (anomaly check)",
-            "/data/log-anomaly (view logs)"
-        ],
-        "instructions": "Use /login to get an MFA code, then /verify-mfa to get a JWT. Use the JWT in the 'Authorization: Bearer <token>' header for protected routes."
-    })
-
-
-@app.route('/register', methods=['POST'])
-@waf_signature_check # WAF Check on registration to prevent injection
-def register():
-    """Registers a new user."""
-    data = request.get_json()
-    username = data.get('username')
-    password = data.get('password')
-    role = data.get('role', 'user') # Default role is 'user'
-
-    if not username or not password:
-        return jsonify({'message': 'Username and password are required.'}), 400
-
-    if User.query.filter_by(username=username).first():
-        return jsonify({'message': 'User already exists.'}), 409
-
-    new_user = User(username=username, role=role)
-    new_user.set_password(password)
-    
-    db.session.add(new_user)
-    db.session.commit()
-    log_security_event('INFO', 'ACCOUNT_CREATION', f'New user registered: {username} with role {role}.')
-    
-    return jsonify({'message': 'User registered successfully. You can now login.'}), 201
-
+    """Serves the main HTML client (index.html)."""
+    return render_template('index.html') 
 
 @app.route('/login', methods=['POST'])
-@waf_signature_check # WAF Check on login
 def login():
-    """Step 1: Authenticate password and generate MFA code."""
+    """Step 1: Authenticates user and initiates MFA by generating a code."""
     data = request.get_json()
     username = data.get('username')
     password = data.get('password')
-    
-    if not username or not password:
-        return jsonify({'message': 'Username and password required.'}), 400
 
-    # --- Intrusion Prevention (Rate Limit) Check ---
-    is_safe, reason = check_rate_limit(username)
-    if not is_safe:
-        return jsonify({'message': reason}), 429
+    if not all([username, password]):
+        return jsonify({'message': 'Missing username or password.'}), 400
+
+    # IPS Check: Block if rate limit is exceeded
+    if check_rate_limit(username):
+        return jsonify({'message': 'Too many failed login attempts. Account temporarily locked (Rate Limit).'}), 429
 
     user = User.query.filter_by(username=username).first()
 
     if user and user.check_password(password):
-        # Successful password authentication
-        
-        # 1. Generate and store a temporary MFA code
-        otp_code = ''.join(random.choices(string.digits, k=6))
-        
-        # 2. Set expiry time (5 minutes from now), ensuring it is timezone-aware (UTC)
-        expiry_time = datetime.now(timezone.utc) + timedelta(minutes=5)
-        
-        user.mfa_code = otp_code
-        user.mfa_code_expiry = expiry_time
-        user.login_failures = 0 # Reset failures on success
-        
+        # Password successful: generate MFA code
+        mfa_code = secrets.token_hex(3).upper() # 6-digit hex code
+        user.mfa_code = mfa_code
+        user.mfa_code_expiry = datetime.now(timezone.utc) + timedelta(seconds=app.config['MFA_CODE_EXPIRY_SECONDS'])
         db.session.commit()
-        log_security_event('INFO', 'AUTH_PASSWORD_SUCCESS', f'Password successful, MFA code generated for {username}.')
         
-        # NOTE: In a real app, the OTP would be sent via email/SMS.
-        return jsonify({
-            'message': 'Password successful. Please verify with the MFA code.',
-            'test_mfa_code': otp_code # DANGER: Only for demo/testing!
-        }), 200
-    else:
-        # Failed password authentication
-        message = f'Failed password attempt for user: {username}'
-        log_security_event('WARNING', 'AUTH_FAILURE', message, username=username)
-        return jsonify({'message': 'Invalid username or password.'}), 401
+        log_security_event('INFO', f'User {username} authenticated primary password. Awaiting MFA.', 'AUTH_PENDING_MFA')
+        
+        print(f"\n--- MFA Code for {username}: {mfa_code} --- (Expires in 5 minutes)\n")
 
+        return jsonify({
+            'message': 'Password correct. MFA code sent. Proceed to /verify-mfa',
+            'status': 'pending_mfa',
+            'username': user.username,
+            'mfa_code_for_demo': mfa_code # Sends code to frontend for easy demo
+            
+        }), 200
+
+    # Login failed (user not found or wrong password)
+    log_security_event('WARNING', f'Login failed for User: {username}.', 'AUTH_FAILURE')
+    return jsonify({'message': 'Invalid credentials or account blocked by IPS.'}), 401
 
 @app.route('/verify-mfa', methods=['POST'])
-@waf_signature_check # WAF Check on MFA verification
 def verify_mfa():
-    """Step 2: Verify MFA code and issue JWT."""
+    """Step 2: Verifies the MFA code and issues the final JWT access token."""
     data = request.get_json()
     username = data.get('username')
-    otp_code = data.get('mfa_code')
-    
-    if not username or not otp_code:
-        return jsonify({'message': 'Username and MFA code required.'}), 400
+    otp_code = data.get('otp_code')
+
+    if not all([username, otp_code]):
+        return jsonify({'message': 'Missing username or OTP code.'}), 400
 
     user = User.query.filter_by(username=username).first()
 
     if not user:
-        log_security_event('WARNING', 'AUTH_MFA_FAILURE', f'MFA attempt on non-existent user: {username}')
-        return jsonify({'message': 'Invalid verification attempt.'}), 401
-
+        return jsonify({'message': 'User not found.'}), 404
+        
     now = datetime.now(timezone.utc)
-
-    # Ensure expiry time is timezone-aware for comparison
-    user_expiry = user.mfa_code_expiry
-    if user_expiry and user_expiry.tzinfo is None:
-        user_expiry = user_expiry.replace(tzinfo=timezone.utc)
+    
+    # Make DB time timezone-aware for correct comparison
+    mfa_expiry_aware = None
+    if user.mfa_code_expiry:
+        mfa_expiry_aware = user.mfa_code_expiry.replace(tzinfo=timezone.utc)
 
     # Check MFA code and expiry
-    if user.mfa_code == otp_code and user_expiry and user_expiry > now:
+    if user.mfa_code == otp_code and mfa_expiry_aware and mfa_expiry_aware > now:
         # Success: Clear MFA code, generate JWT
         user.mfa_code = None
         user.mfa_code_expiry = None
-        
-        token = create_jwt(user.id, user.role, user.username)
-        
         db.session.commit()
-        log_security_event('INFO', 'AUTH_SUCCESS', f'MFA successful, JWT issued for {username} (Role: {user.role}).', username=user.username)
+        
+        access_token = generate_jwt_token(user)
+        
+        log_security_event('INFO', f'User {username} successfully completed MFA and received JWT.', 'AUTH_SUCCESS')
         
         return jsonify({
-            'message': 'Login successful. JWT token issued.',
-            'token': f'Bearer {token}'
+            'message': 'MFA successful. JWT issued.',
+            'access_token': access_token,
+            'role': user.role
         }), 200
-    else:
-        # Failed verification
-        reason = "Invalid MFA code" if user.mfa_code != otp_code else "MFA code expired"
-        log_security_event('WARNING', 'AUTH_MFA_FAILURE', f'MFA attempt failed for {username}. Reason: {reason}.', username=user.username)
-        return jsonify({'message': 'Invalid or expired MFA code.'}), 401
+    
+    # Failure: Log and respond
+    log_security_event('WARNING', f'MFA verification failed for user {username}. Code mismatch or expired.', 'AUTH_FAILURE')
+    return jsonify({'message': 'Invalid or expired OTP code.'}), 401
 
-# --- Protected Data Routes ---
+# --- Protected Routes (RBAC Test) ---
 
-# CRITICAL DECORATOR ORDER:
-# 1. token_required (Auth & RBAC, sets request.current_user)
-# 2. waf_signature_check (Runs WAF check with context)
-# 3. velocity_anomaly_check (Runs AFTER Auth is confirmed and current_user is set)
-
-@app.route('/data/user-profile', methods=['GET'])
-@token_required(roles=['user', 'finance', 'admin'])
-@waf_signature_check
-@velocity_anomaly_check
-def user_profile():
-    """Accessible by all authenticated users."""
-    user = request.current_user
-    return jsonify({
-        'message': f"Welcome, {user.get('username')}. Access granted to basic user profile data.",
-        'user_id': user.get('user_id'),
-        'role': user.get('role')
-    })
-
-@app.route('/data/finance-report', methods=['GET'])
-@token_required(roles=['finance', 'admin'])
-@waf_signature_check
-@velocity_anomaly_check
-def finance_report():
-    """Accessible by finance and admin roles (Least Privilege Principle)."""
-    user = request.current_user
-    return jsonify({
-        'message': f"ACCESS GRANTED: Financial Summary Q4. User: {user.get('username')}.",
-        'report_data': {'revenue': 1200000, 'profit': 350000}
-    })
-
-@app.route('/data/admin-report', methods=['POST'])
+@app.route('/data/admin-report', methods=['GET'])
 @token_required(roles=['admin'])
-@waf_signature_check
-@velocity_anomaly_check
-def admin_report():
-    """Accessible by admin role only (Strict RBAC). Also used for Signature Test."""
-    user = request.current_user
-    data = request.get_json()
-    action = data.get('action', 'unspecified')
+def get_admin_report():
+    """Access control test: Requires 'admin' role."""
     return jsonify({
-        'message': f"CRITICAL ACCESS GRANTED: System Configuration Report. User: {user.get('username')}.",
-        'action_taken': f"Admin action processed: {action}"
+        'message': f'Admin Report Accessed Successfully by {g.current_user.username} (Role: {g.current_user.role}).',
+        'data': {'metric': 'New Incidents (Past 24h)', 'value': 3}
     })
 
-@app.route('/data/high-value-asset', methods=['GET'])
-@token_required(roles=['admin', 'finance'])
-@waf_signature_check
-@velocity_anomaly_check
-def high_value_asset():
-    """
-    Simulates access to a highly sensitive asset.
-    Will trigger the VELOCITY_ANOMALY alert if accessed too frequently.
-    """
-    user = request.current_user
+@app.route('/data/finance-data', methods=['GET'])
+@token_required(roles=['finance', 'admin'])
+def get_finance_data():
+    """Access control test: Requires 'finance' or 'admin' role."""
     return jsonify({
-        'message': f"SENSITIVE DATA ACCESS GRANTED: High-Value Customer PII. User: {user.get('username')}.",
-        'asset_id': 'HVAC-4456',
-        'risk_level': 'High'
+        'message': f'Finance Data Accessed Successfully by {g.current_user.username} (Role: {g.current_user.role}).',
+        'data': {'metric': 'Q3 Revenue', 'value': '$12.5M'}
     })
 
+# --- Public Route (Intrusion Log Display) ---
 
 @app.route('/data/log-anomaly', methods=['GET'])
-@token_required(roles=['admin'])
-@waf_signature_check
-@velocity_anomaly_check
-def view_anomaly_logs():
-    """
-    Allows admins to view all security logs, particularly ANOMALY events.
-    """
-    # Filter for the most critical events for demonstration purposes
-    logs = SecurityLog.query.filter(
-        SecurityLog.level.in_(['ALERT', 'CRITICAL'])
-    ).order_by(SecurityLog.timestamp.desc()).limit(50).all()
+def get_security_logs():
+    """Retrieves the last 20 security logs for public viewing."""
+    logs = SecurityLog.query.order_by(SecurityLog.timestamp.desc()).limit(20).all()
     
-    return jsonify({
-        'message': 'Displaying last 50 ALERT/CRITICAL logs (Anomaly Detection Feed)',
-        'logs': [log.to_dict() for log in logs]
-    })
+    log_list = [{
+        'timestamp': log.timestamp.isoformat(),
+        'level': log.level,
+        'message': log.message,
+        'source_ip': log.source_ip,
+        'type': log.log_type
+    } for log in logs]
 
-
-if __name__ == '__main__':
-    # Log level for SQLAlchemy to Debug (optional, but helpful)
-    import logging
-    logging.getLogger('sqlalchemy.engine').setLevel(logging.INFO)
-    app.run(debug=True)
+    return jsonify(log_list), 200
