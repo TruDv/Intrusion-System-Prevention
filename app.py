@@ -67,7 +67,7 @@ class SecurityLog(db.Model):
     """Records all security events for monitoring and audit trail."""
     id = db.Column(db.Integer, primary_key=True)
     timestamp = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    level = db.Column(db.String(10))  # INFO, WARNING, ALERT, CRITICAL
+    level = db.Column(db.String(10)) # INFO, WARNING, ALERT, CRITICAL
     event_type = db.Column(db.String(30)) # AUTH_SUCCESS, AUTH_FAILURE, RATE_LIMIT, AUTHZ_FAILURE, SIGNATURE_MATCH, VELOCITY_ANOMALY
     message = db.Column(db.Text)
     username = db.Column(db.String(80), nullable=True)
