@@ -1,6 +1,6 @@
 Flask
 Flask-CORS
-Flask-SQLAlchemy  <-- ADDED: Fixes the 'ModuleNotFoundError'
+Flask-SQLAlchemy
 gunicorn
 pyjwt
 werkzeug
