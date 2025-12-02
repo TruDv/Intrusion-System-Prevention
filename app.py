@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 
 # Database and Server Imports
-from flask import Flask, request, jsonify, g, render_template  # <-- ADDED render_template
+from flask import Flask, request, jsonify, g, render_template
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 
@@ -17,6 +17,7 @@ import secrets
 # --- Configuration ---
 class Config:
     # Database Configuration
+    # Uses SQLite (intrusion_system.db)
     SQLALCHEMY_DATABASE_URI = 'sqlite:///intrusion_system.db'
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     
@@ -36,7 +37,7 @@ class Config:
 app = Flask(__name__)
 app.config.from_object(Config)
 
-# Enable CORS for all origins and routes (necessary for frontend communication)
+# Enable CORS (necessary for frontend communication, even though Flask serves the HTML)
 CORS(app)
 
 # Database Initialization
@@ -50,7 +51,7 @@ class User(db.Model):
     username = db.Column(db.String(80), unique=True, nullable=False)
     password_hash = db.Column(db.String(128), nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
-    role = db.Column(db.String(20), default='user') # e.g., 'user', 'admin', 'finance'
+    role = db.Column(db.String(20), default='user')
     
     # MFA Fields
     mfa_code = db.Column(db.String(6), nullable=True)
@@ -65,17 +66,17 @@ class User(db.Model):
 class SecurityLog(db.Model):
     """Simulates logging of system events or anomalies."""
     id = db.Column(db.Integer, primary_key=True)
-    timestamp = db.Column(db.DateTime, default=datetime.now(timezone.utc))
-    level = db.Column(db.String(20)) # e.g., 'INFO', 'WARNING', 'CRITICAL'
+    # Always store timestamps as UTC
+    timestamp = db.Column(db.DateTime, default=datetime.now(timezone.utc)) 
+    level = db.Column(db.String(20))
     message = db.Column(db.String(500))
     source_ip = db.Column(db.String(45), nullable=True)
-    log_type = db.Column(db.String(50)) # e.g., 'AUTH_SUCCESS', 'AUTH_FAILURE', 'AUTHZ_FAILURE', 'RATE_LIMIT'
+    log_type = db.Column(db.String(50))
 
 # --- Helper Functions ---
 
 def log_security_event(level, message, log_type):
     """Adds an entry to the SecurityLog table."""
-    # Use request.remote_addr to simulate getting the client IP
     source_ip = request.remote_addr if request else 'N/A'
     
     log = SecurityLog(
@@ -99,7 +100,6 @@ def generate_jwt_token(user):
         'role': user.role
     }
     
-    # Encode the token using the secret key
     token = jwt.encode(
         payload, 
         app.config['SECRET_KEY'], 
@@ -110,14 +110,12 @@ def generate_jwt_token(user):
 def token_required(roles=[]):
     """
     Decorator to protect routes and enforce role-based access control (RBAC).
-    Accepts a list of required roles (e.g., ['admin', 'finance']).
     """
     def decorator(f):
         @wraps(f)
         def decorated(*args, **kwargs):
             token = None
             if 'Authorization' in request.headers:
-                # Expects 'Bearer <token>'
                 auth_header = request.headers['Authorization']
                 if auth_header.startswith('Bearer '):
                     token = auth_header.split(' ')[1]
@@ -127,7 +125,6 @@ def token_required(roles=[]):
                 return jsonify({'message': 'Authorization Token is missing!'}), 401
             
             try:
-                # Decode the token
                 data = jwt.decode(
                     token, 
                     app.config['SECRET_KEY'],
@@ -155,17 +152,13 @@ def token_required(roles=[]):
                 log_security_event('CRITICAL', 'Access attempt with invalid token.', 'AUTHZ_FAILURE')
                 return jsonify({'message': 'Token is invalid.'}), 401
             except Exception as e:
-                # General catch-all for decoding errors
                 log_security_event('ERROR', f'Token processing error: {str(e)}', 'AUTHZ_FAILURE')
                 return jsonify({'message': 'Token processing error.'}), 401
 
-            # Store user object in Flask's global context (g) for use in the route function
             g.current_user = current_user
             return f(*args, **kwargs)
         return decorated
     return decorator
-
-# --- Intrusion Prevention System (IPS) Rate Limiter ---
 
 def check_rate_limit(username=None):
     """
@@ -173,10 +166,9 @@ def check_rate_limit(username=None):
     Returns True if rate-limited (blocked), False otherwise.
     """
     source_ip = request.remote_addr
-
-    # 1. Check IP-based failures (to prevent brute-forcing unknown accounts)
     time_window = datetime.now(timezone.utc) - timedelta(seconds=app.config['RATE_LIMIT_WINDOW_SECONDS'])
     
+    # 1. Check IP-based failures
     ip_failures = SecurityLog.query.filter(
         SecurityLog.log_type == 'AUTH_FAILURE',
         SecurityLog.source_ip == source_ip,
@@ -184,42 +176,67 @@ def check_rate_limit(username=None):
     ).count()
 
     if ip_failures >= app.config['MAX_LOGIN_ATTEMPTS']:
-        log_security_event(
-            'ALERT', 
-            f'Rate Limit Triggered. IP {source_ip} blocked after {ip_failures} failed attempts within the window.', 
-            'RATE_LIMIT'
-        )
-        return True # Blocked
+        log_security_event('ALERT', f'Rate Limit Triggered. IP {source_ip} blocked.', 'RATE_LIMIT')
+        return True
     
-    # 2. Check Username-based failures (to prevent specific account targeting)
+    # 2. Check Username-based failures
     if username:
         user_failures = SecurityLog.query.filter(
             SecurityLog.log_type == 'AUTH_FAILURE',
-            SecurityLog.message.like(f'%User: {username}%'), # Search for the username in the message
+            SecurityLog.message.like(f'%User: {username}%'),
             SecurityLog.timestamp >= time_window
         ).count()
         
         if user_failures >= app.config['MAX_LOGIN_ATTEMPTS']:
-            log_security_event(
-                'ALERT', 
-                f'Rate Limit Triggered. Username {username} blocked after {user_failures} failed attempts within the window.', 
-                'RATE_LIMIT'
-            )
-            return True # Blocked
+            log_security_event('ALERT', f'Rate Limit Triggered. Username {username} blocked.', 'RATE_LIMIT')
+            return True
 
-    return False # Not Blocked
+    return False
+
+# --- Database Initialization Function ---
+
+def create_db_and_users():
+    """Creates the database and adds an initial admin user for testing."""
+    # This function must be run within the application context.
+    
+    # NOTE: db.drop_all() is included for a clean demo environment, 
+    # but should be removed in a non-ephemeral/production environment.
+    db.drop_all() 
+    db.create_all()
+
+    # Create default users for easy testing
+    if User.query.filter_by(username='admin').first() is None:
+        admin_user = User(username='admin', email='admin@demo.com', role='admin')
+        admin_user.set_password('securepassword')
+        db.session.add(admin_user)
+        print("Default Admin user created: admin/securepassword")
+        
+    if User.query.filter_by(username='finance').first() is None:
+        finance_user = User(username='finance', email='finance@demo.com', role='finance')
+        finance_user.set_password('securepassword')
+        db.session.add(finance_user)
+        print("Default Finance user created: finance/securepassword")
+        
+    if User.query.filter_by(username='user1').first() is None:
+        standard_user = User(username='user1', email='user1@demo.com', role='user')
+        standard_user.set_password('securepassword')
+        db.session.add(standard_user)
+        print("Default Standard user created: user1/securepassword")
+
+    db.session.commit()
+    log_security_event('INFO', 'Database initialized and default users created.', 'SYSTEM_INIT')
+
 
 # --- Application Routes ---
 
 @app.route('/', methods=['GET'])
 def index():
     """Serves the main HTML client (index.html)."""
-    # The frontend is now served by the backend, simplifying deployment and CORS
     return render_template('index.html') 
 
 @app.route('/register', methods=['POST'])
 def register_user():
-    """Route to create a new user account (Role: 'admin' for demo purposes)."""
+    """Route to create a new user account."""
     data = request.get_json()
     username = data.get('username')
     password = data.get('password')
@@ -251,7 +268,7 @@ def login():
     if not all([username, password]):
         return jsonify({'message': 'Missing username or password.'}), 400
 
-    # IPS Check: This must happen before password validation to prevent brute force
+    # IPS Check: Block if rate limit is exceeded
     if check_rate_limit(username):
         return jsonify({'message': 'Too many failed login attempts. Account temporarily locked (Rate Limit).'}), 429
 
@@ -264,19 +281,21 @@ def login():
         user.mfa_code_expiry = datetime.now(timezone.utc) + timedelta(seconds=app.config['MFA_CODE_EXPIRY_SECONDS'])
         db.session.commit()
         
-        # Log success and inform user (MFA pending)
         log_security_event('INFO', f'User {username} authenticated primary password. Awaiting MFA.', 'AUTH_PENDING_MFA')
         
-        # NOTE: Print MFA code to console for demo
+        # NOTE: Print MFA code to console for demo (Visible in Render logs)
         print(f"\n--- MFA Code for {username}: {mfa_code} --- (Expires in 5 minutes)\n")
 
         return jsonify({
             'message': 'Password correct. MFA code sent. Proceed to /verify-mfa',
             'status': 'pending_mfa',
-            'username': user.username
+            'username': user.username,
+            # *** CRITICAL FOR FRONTEND DEMO ***
+            'mfa_code_for_demo': mfa_code 
+            
         }), 200
 
-    # If login fails (user not found or wrong password)
+    # Login failed (user not found or wrong password)
     log_security_event('WARNING', f'Login failed for User: {username}.', 'AUTH_FAILURE')
     return jsonify({'message': 'Invalid credentials or account blocked by IPS.'}), 401
 
@@ -297,12 +316,10 @@ def verify_mfa():
         
     now = datetime.now(timezone.utc)
     
-    # --- TIMEZONE FIX ---
-    # Convert the offset-naive DB value to offset-aware (UTC) for comparison with 'now'
+    # Must convert the DB time to be timezone-aware (UTC) for comparison with 'now'
     mfa_expiry_aware = None
     if user.mfa_code_expiry:
         mfa_expiry_aware = user.mfa_code_expiry.replace(tzinfo=timezone.utc)
-    # --- END FIX ---
 
     # Check MFA code and expiry
     if user.mfa_code == otp_code and mfa_expiry_aware and mfa_expiry_aware > now:
@@ -355,7 +372,7 @@ def get_finance_data():
 
 @app.route('/data/log-anomaly', methods=['GET'])
 def get_security_logs():
-    """Retrieves the last 20 security logs for public viewing (anomaly detection visualization)."""
+    """Retrieves the last 20 security logs for public viewing."""
     logs = SecurityLog.query.order_by(SecurityLog.timestamp.desc()).limit(20).all()
     
     log_list = [{
@@ -368,50 +385,11 @@ def get_security_logs():
 
     return jsonify(log_list), 200
 
-# --- Server Startup ---
+# --- Local Debugging Startup (Optional, remove for deployment) ---
 
-def create_db_and_users():
-    """Creates the database and adds an initial admin user for testing."""
-    with app.app_context():
-        # Drop and create tables fresh for a clean demo environment
-        db.drop_all()
-        db.create_all()
-
-        # Create Admin User (for RBAC testing)
-        if User.query.filter_by(username='admin').first() is None:
-            admin_user = User(username='admin', email='admin@demo.com', role='admin')
-            admin_user.set_password('securepassword')
-            db.session.add(admin_user)
-            print("Admin user created: admin/securepassword")
-            
-        # Create Finance User (for RBAC testing)
-        if User.query.filter_by(username='finance').first() is None:
-            finance_user = User(username='finance', email='finance@demo.com', role='finance')
-            finance_user.set_password('securepassword')
-            db.session.add(finance_user)
-            print("Finance user created: finance/securepassword")
-            
-        # Create a standard user (for RBAC testing)
-        if User.query.filter_by(username='user1').first() is None:
-            standard_user = User(username='user1', email='user1@demo.com', role='user')
-            standard_user.set_password('securepassword')
-            db.session.add(standard_user)
-            print("Standard user created: user1/securepassword")
-
-        # Create a test user for brute force simulation against an unknown user
-        if User.query.filter_by(username='testuser').first() is None:
-            test_user = User(username='testuser', email='test@bruteforce.com', role='user')
-            test_user.set_password('correctpassword')
-            db.session.add(test_user)
-            print("Test user for rate limiting created: testuser/correctpassword")
-
-
-        db.session.commit()
-        log_security_event('INFO', 'Database initialized and default users created.', 'SYSTEM_INIT')
-
-
-if __name__ == '__main__':
-    create_db_and_users()
-    print("\n--- Starting Flask Server ---")
-    # For local dev, using debug=True is fine. For deployment, gunicorn handles execution.
-    app.run(debug=True)
+# if __name__ == '__main__':
+#     # This block is ignored by Gunicorn in production
+#     with app.app_context():
+#         create_db_and_users()
+#     print("\n--- Starting Flask Server on http://127.0.0.1:5000 ---")
+#     app.run(debug=True)

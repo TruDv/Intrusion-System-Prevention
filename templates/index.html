@@ -85,8 +85,7 @@
 
     <script>
         // --- Core Variables ---
-        // CHANGED: Use relative path since Flask serves this file, preventing CORS issues.
-        const API_BASE_URL = ''; 
+        const API_BASE_URL = ''; // Uses relative path (same origin as HTML), solving CORS issues
         let currentToken = null;
         let currentUserRole = null;
         let currentUsername = null; 
@@ -97,15 +96,14 @@
             const statusBox = document.getElementById('server-status');
             statusBox.classList.remove('hidden', 'bg-red-100', 'text-red-800', 'bg-green-100', 'text-green-800');
             statusBox.classList.add(isOk ? 'bg-green-100' : 'bg-red-100', isOk ? 'text-green-800' : 'text-red-800');
-            // Updated text to reflect potential live URL, but still mention local for context
-            statusBox.textContent = isOk ? '✅ Server Status: Running (Local or Deployed)' : '❌ Server Status: OFFLINE. Please run "python app.py" or check deployment status.';
+            statusBox.textContent = isOk ? '✅ Server Status: Running' : '❌ Server Status: OFFLINE. Check Render logs or deployment status.';
         }
         
         async function checkServerStatus() {
             try {
                 // Check connectivity to the root API path
                 const response = await fetch(API_BASE_URL + '/register', { method: 'OPTIONS' });
-                setServerStatus(response.ok || response.status === 405); // 405 is fine for OPTIONS check
+                setServerStatus(response.ok || response.status === 405);
             } catch (error) {
                 setServerStatus(false);
             }
@@ -113,13 +111,13 @@
 
         function showMessage(text, isError = false) {
             const box = document.getElementById('message-box');
-            box.innerHTML = text; // Use innerHTML for allowing spans (like in MFA message)
+            box.innerHTML = text; // Use innerHTML to allow HTML formatting (e.g., span for MFA code)
             box.classList.remove('hidden', 'bg-red-100', 'text-red-800', 'bg-blue-100', 'text-blue-800', 'bg-green-100', 'text-green-800');
             
             if (isError) {
                 box.classList.add('bg-red-100', 'text-red-800');
                 console.error('API Error:', text);
-            } else if (text.includes('MFA required') || text.includes('MFA code sent')) {
+            } else if (text.includes('MFA REQUIRED')) {
                 box.classList.add('bg-blue-100', 'text-blue-800');
             } else {
                 box.classList.add('bg-green-100', 'text-green-800');
@@ -131,7 +129,6 @@
             document.getElementById('message-box').classList.add('hidden');
         }
 
-        /** Helper function to escape HTML special characters in strings. */
         function escapeHtml(unsafe) {
             if (!unsafe) return '';
             return unsafe
@@ -156,16 +153,11 @@
                 body: body ? JSON.stringify(body) : null
             });
 
-            if (response.status === 405) {
-                throw new Error(`Server returned 405 Method Not Allowed. Check server logs for error details.`);
-            }
-
-            // Attempt to parse JSON even if status is not OK, as the server sends JSON error messages
             let data = {};
             try {
                 data = await response.json();
             } catch (e) {
-                // If it's not JSON, throw a generic error
+                // Handle cases where server returns a non-JSON 500 page
                 throw new Error(`HTTP Error ${response.status}: Server returned non-JSON response.`);
             }
             
@@ -196,7 +188,7 @@
                 </form>
 
                 <div class="mt-4 pt-4 border-t border-gray-100">
-                    <p class="text-sm text-center text-gray-500 mb-2">New User?</p>
+                    <p class="text-sm text-center text-gray-500 mb-2">New User? They will receive role 'admin'.</p>
                     <button onclick="renderRegisterUI()" class="w-full py-2 px-4 rounded-lg bg-gray-500 hover:bg-gray-600 text-white font-semibold transition duration-150 shadow-sm">
                         Go to Registration
                     </button>
@@ -205,14 +197,13 @@
         }
 
         function renderRegisterUI() {
-            // Note: The backend ignores the role and forces 'admin' for demo simplicity
              document.getElementById('auth-flow-container').innerHTML = `
                 <h2 class="text-2xl font-bold text-center text-gray-700 mb-4">Register New Account</h2>
                 <form id="register-form" onsubmit="event.preventDefault(); handleRegister();" class="space-y-4">
                     <input type="text" id="reg_username" placeholder="New Username" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" required>
                     <input type="password" id="reg_password" placeholder="Password" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" required>
                     <input type="email" id="reg_email" placeholder="Email Address" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" required>
-                    <p class="text-xs text-gray-500">Note: Backend currently forces role to 'admin' for new users for easy demo access.</p>
+                    <p class="text-xs text-gray-500">Note: Backend currently forces role to 'admin'.</p>
                     
                     <button type="submit" class="w-full py-3 px-4 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold transition duration-150 shadow-md">
                         Register
@@ -227,14 +218,20 @@
         }
 
 
-        function renderMFAUI() {
+        function renderMFAUI(mfaCode) {
             clearMessage();
-            showMessage(`MFA required. Code sent to server console for user <span class="font-extrabold">${currentUsername}</span>.`, false);
+            
+            // Display the code clearly in the message box 
+            showMessage(`
+                🔑 **MFA REQUIRED!** Your one-time code for **${currentUsername}** is: 
+                <span class="font-extrabold text-lg bg-yellow-200 p-1 rounded-md text-red-800">${mfaCode}</span>.
+                <br>(For demonstration purposes only: normally this would be sent privately.)
+            `, false);
 
             document.getElementById('auth-flow-container').innerHTML = `
                 <form onsubmit="event.preventDefault(); handleVerifyMFA();" class="space-y-4">
                     <h2 class="text-2xl font-bold text-center text-teal-600">MFA Verification</h2>
-                    <p class="text-sm text-center text-gray-600">Enter the 6-character hex code found in the Python console.</p>
+                    <p class="text-sm text-center text-gray-600">Enter the 6-character hex code from the message box above.</p>
                     <input type="text" id="otp_code" placeholder="MFA Code (e.g., A1B2C3)" class="w-full p-4 border-2 border-teal-300 rounded-lg text-center text-xl tracking-wider focus:ring-teal-500 focus:border-teal-500" maxlength="6" required>
                     
                     <button type="submit" class="w-full py-3 px-4 rounded-lg bg-teal-600 hover:bg-teal-700 text-white font-semibold transition duration-150 shadow-md">
@@ -258,11 +255,8 @@
             const username = document.getElementById('reg_username').value;
             const password = document.getElementById('reg_password').value;
             const email = document.getElementById('reg_email').value;
-            // Removed role selection input from DOM as backend forces 'admin'
-            // const role = document.getElementById('reg_role').value; 
 
             try {
-                // Pass role as a dummy value or omit it, as the backend overrides it.
                 const data = await apiFetch('/register', 'POST', { username, password, email, role: 'user' }); 
                 showMessage(data.message, false);
                 renderLoginUI();
@@ -280,7 +274,8 @@
 
                 if (data.status === 'pending_mfa') {
                     currentUsername = data.username;
-                    renderMFAUI();
+                    const mfaCode = data.mfa_code_for_demo; 
+                    renderMFAUI(mfaCode);
                 } else {
                     showMessage(data.message, false);
                 }
@@ -337,11 +332,10 @@
                         if (log.level === 'WARNING') color = 'text-yellow-400';
                         if (log.level === 'CRITICAL' || log.level === 'ALERT') color = 'text-red-400';
 
-                        // Escape log.message before injecting into innerHTML to prevent XSS.
                         const escapedMessage = escapeHtml(log.message);
 
                         return `<span class="${color}">[${time} | ${log.type}]</span> ${escapedMessage}`;
-                    }).join('\n'); // Use '\n' which works in a <pre> tag
+                    }).join('\n');
                     
                     logOutput.innerHTML = formattedLogs;
                 } else {
