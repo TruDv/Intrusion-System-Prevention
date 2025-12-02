@@ -16,6 +16,7 @@ os.environ['FLASK_SECRET_KEY'] = 'a_very_secret_key_for_jwt_signing'
 
 class Config:
     """Application configuration settings."""
+    # NOTE: In a real application, use a more robust, external database (e.g., PostgreSQL).
     SQLALCHEMY_DATABASE_URI = 'sqlite:///security_model.db'
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     SECRET_KEY = os.environ.get('FLASK_SECRET_KEY', 'a_default_secret_key_if_env_not_set')
@@ -31,13 +32,13 @@ class Config:
     
 # Signature Blacklist (Simulating Known Attack Patterns for Signature-Based WAF)
 KNOWN_MALICIOUS_SIGNATURES = [
-    "SELECT * FROM users",
-    "UNION ALL",
-    "DROP TABLE",
-    "<SCRIPT>",
-    "CMD.EXE",
-    "../",
-    "1=1"
+    "SELECT * FROM users", # SQL Injection
+    "UNION ALL",           # SQL Injection
+    "DROP TABLE",          # SQL Injection
+    "<SCRIPT>",            # Cross-Site Scripting (XSS)
+    "CMD.EXE",             # OS Command Injection
+    "../",                 # Path Traversal
+    "1=1"                  # SQL Injection
 ]
 
 app = Flask(__name__)
@@ -66,7 +67,7 @@ class SecurityLog(db.Model):
     """Records all security events for monitoring and audit trail."""
     id = db.Column(db.Integer, primary_key=True)
     timestamp = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    level = db.Column(db.String(10))  # INFO, WARNING, ALERT, CRITICAL
+    level = db.Column(db.String(10))  # INFO, WARNING, ALERT, CRITICAL
     event_type = db.Column(db.String(30)) # AUTH_SUCCESS, AUTH_FAILURE, RATE_LIMIT, AUTHZ_FAILURE, SIGNATURE_MATCH, VELOCITY_ANOMALY
     message = db.Column(db.Text)
     username = db.Column(db.String(80), nullable=True)
@@ -107,6 +108,7 @@ def log_security_event(level, event_type, message, username=None):
 
 def get_client_ip():
     """Safely retrieves the client's IP address, accounting for proxies."""
+    # In a production environment, configure the trusted proxy count properly.
     if request.headers.getlist("X-Forwarded-For"):
         # The true client IP is usually the first address in the list
         return request.headers.getlist("X-Forwarded-For")[0]
@@ -115,7 +117,11 @@ def get_client_ip():
 # JWT and Authentication logic (Simplified, without external library)
 
 def create_jwt(user_id, role, username):
-    """Creates a simple, signed JWT containing user identity and role."""
+    """
+    Creates a simple, *UNSIGNED* JWT for demonstration purposes.
+    CRITICAL: In a real-world application, this MUST be cryptographically 
+    signed (e.g., using python-jose or PyJWT) to prevent forgery.
+    """
     header = {"alg": "HS256", "typ": "JWT"}
     payload = {
         "user_id": user_id,
@@ -124,7 +130,6 @@ def create_jwt(user_id, role, username):
         # Expiration time is a timestamp for easy comparison
         "exp": (datetime.now(timezone.utc) + timedelta(minutes=app.config['JWT_EXPIRATION_MINUTES'])).timestamp()
     }
-    # In a real app, this would be cryptographically signed. Here, we just base64 encode for demonstration.
     return json.dumps({"header": header, "payload": payload}) 
 
 def decode_jwt(token):
@@ -178,16 +183,11 @@ def check_rate_limit(username=None):
             
     return True, None
 
-def signature_and_anomaly_check(f):
-    """
-    Enhanced Intrusion Prevention: Combines Signature Detection (WAF-like) 
-    and Velocity Anomaly Detection (User Behavior).
-    """
+
+def waf_signature_check(f):
+    """Intrusion Prevention: Signature-Based Detection (Web Application Firewall Model)."""
     @wraps(f)
     def decorated(*args, **kwargs):
-        # We don't need the IP here, as it's primarily an RBAC/WAF/Velocity check.
-        
-        # --- 1. Signature-Based Detection (Web Application Firewall Model) ---
         
         # Get all request data (JSON body, form data, URL arguments)
         data_to_check = []
@@ -195,7 +195,8 @@ def signature_and_anomaly_check(f):
         # 1.1 Check JSON body
         try:
             if request.is_json:
-                data_to_check.append(json.dumps(request.get_json()))
+                # Use request.get_data(as_text=True) for raw string data inspection
+                data_to_check.append(request.get_data(as_text=True) or "")
         except Exception:
             pass
         
@@ -212,15 +213,23 @@ def signature_and_anomaly_check(f):
         for signature in KNOWN_MALICIOUS_SIGNATURES:
             if signature.upper() in all_data:
                 # Attack detected! Block immediately.
+                username = getattr(request, 'current_user', {}).get('username', 'UNAUTH')
                 log_security_event('CRITICAL', 'SIGNATURE_MATCH', 
                                    f'Blocked request containing malicious signature: "{signature}"', 
-                                   username=getattr(request, 'current_user', {}).get('username'))
+                                   username=username)
                 return jsonify({'message': 'Access Denied: Malicious signature detected (Signature-Based Prevention).'}), 403
 
-        # --- 2. Velocity Anomaly Detection (Post-Authentication Check) ---
-        
-        # This check is only relevant if the user token was successfully decoded (i.e., post-login)
+        return f(*args, **kwargs)
+    return decorated
+
+
+def velocity_anomaly_check(f):
+    """Anomaly Detection: Checks the rate of successful authenticated requests for a user."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
         current_user = getattr(request, 'current_user', None)
+        
+        # This check is only relevant if the user token was successfully decoded
         if current_user:
             username = current_user.get('username')
             now = datetime.now(timezone.utc)
@@ -230,7 +239,7 @@ def signature_and_anomaly_check(f):
             recent_requests = SecurityLog.query.filter(
                 SecurityLog.username == username,
                 # Include successful log events that track legitimate activity
-                SecurityLog.event_type.in_(['AUTH_SUCCESS', 'AUTHZ_SUCCESS']),
+                SecurityLog.event_type.in_(['AUTHZ_SUCCESS']), 
                 SecurityLog.timestamp > time_window_start
             ).count()
 
@@ -244,7 +253,6 @@ def signature_and_anomaly_check(f):
             # Log the successful request that passed all checks for the anomaly calculation
             # This request itself must be logged so it counts towards the next velocity check
             log_security_event('INFO', 'AUTHZ_SUCCESS', f'Authenticated request accepted for user {username}.', username=username)
-
 
         # If all checks pass, proceed to the original function
         return f(*args, **kwargs)
@@ -270,7 +278,8 @@ def token_required(roles=None):
             if not current_user:
                 return jsonify({'message': 'Authentication failed. Token invalid or expired.'}), 401
 
-            # Attach user info to the request object for use by other checks/routes (like anomaly check)
+            # Attach user info to the request object for use by other checks/routes 
+            # (Velocity Check, which runs after this decorator)
             request.current_user = current_user
             
             # --- 3. Role-Based Access Control (Authorization) ---
@@ -324,11 +333,13 @@ def index():
             "/data/admin-report (admin only)",
             "/data/high-value-asset (anomaly check)",
             "/data/log-anomaly (view logs)"
-        ]
+        ],
+        "instructions": "Use /login to get an MFA code, then /verify-mfa to get a JWT. Use the JWT in the 'Authorization: Bearer <token>' header for protected routes."
     })
 
 
 @app.route('/register', methods=['POST'])
+@waf_signature_check # WAF Check on registration to prevent injection
 def register():
     """Registers a new user."""
     data = request.get_json()
@@ -353,6 +364,7 @@ def register():
 
 
 @app.route('/login', methods=['POST'])
+@waf_signature_check # WAF Check on login
 def login():
     """Step 1: Authenticate password and generate MFA code."""
     data = request.get_json()
@@ -398,6 +410,7 @@ def login():
 
 
 @app.route('/verify-mfa', methods=['POST'])
+@waf_signature_check # WAF Check on MFA verification
 def verify_mfa():
     """Step 2: Verify MFA code and issue JWT."""
     data = request.get_json()
@@ -415,7 +428,7 @@ def verify_mfa():
 
     now = datetime.now(timezone.utc)
 
-    # Convert potentially naive datetime objects from SQLite to timezone-aware UTC for comparison
+    # Ensure expiry time is timezone-aware for comparison
     user_expiry = user.mfa_code_expiry
     if user_expiry and user_expiry.tzinfo is None:
         user_expiry = user_expiry.replace(tzinfo=timezone.utc)
@@ -443,13 +456,15 @@ def verify_mfa():
 
 # --- Protected Data Routes ---
 
-# The order of decorators is CRUCIAL: 
-# 1. signature_and_anomaly_check (WAF/Velocity check first, before decoding token)
-# 2. token_required (Authentication & RBAC)
+# CRITICAL DECORATOR ORDER:
+# 1. token_required (Auth & RBAC, sets request.current_user)
+# 2. waf_signature_check (Runs WAF check with context)
+# 3. velocity_anomaly_check (Runs AFTER Auth is confirmed and current_user is set)
 
 @app.route('/data/user-profile', methods=['GET'])
-@signature_and_anomaly_check
 @token_required(roles=['user', 'finance', 'admin'])
+@waf_signature_check
+@velocity_anomaly_check
 def user_profile():
     """Accessible by all authenticated users."""
     user = request.current_user
@@ -460,8 +475,9 @@ def user_profile():
     })
 
 @app.route('/data/finance-report', methods=['GET'])
-@signature_and_anomaly_check
 @token_required(roles=['finance', 'admin'])
+@waf_signature_check
+@velocity_anomaly_check
 def finance_report():
     """Accessible by finance and admin roles (Least Privilege Principle)."""
     user = request.current_user
@@ -471,8 +487,9 @@ def finance_report():
     })
 
 @app.route('/data/admin-report', methods=['POST'])
-@signature_and_anomaly_check
 @token_required(roles=['admin'])
+@waf_signature_check
+@velocity_anomaly_check
 def admin_report():
     """Accessible by admin role only (Strict RBAC). Also used for Signature Test."""
     user = request.current_user
@@ -484,15 +501,15 @@ def admin_report():
     })
 
 @app.route('/data/high-value-asset', methods=['GET'])
-@signature_and_anomaly_check
 @token_required(roles=['admin', 'finance'])
+@waf_signature_check
+@velocity_anomaly_check
 def high_value_asset():
     """
     Simulates access to a highly sensitive asset.
     Will trigger the VELOCITY_ANOMALY alert if accessed too frequently.
     """
     user = request.current_user
-    # The AUTHZ_SUCCESS logging happens inside the decorator for this route.
     return jsonify({
         'message': f"SENSITIVE DATA ACCESS GRANTED: High-Value Customer PII. User: {user.get('username')}.",
         'asset_id': 'HVAC-4456',
@@ -502,6 +519,8 @@ def high_value_asset():
 
 @app.route('/data/log-anomaly', methods=['GET'])
 @token_required(roles=['admin'])
+@waf_signature_check
+@velocity_anomaly_check
 def view_anomaly_logs():
     """
     Allows admins to view all security logs, particularly ANOMALY events.
