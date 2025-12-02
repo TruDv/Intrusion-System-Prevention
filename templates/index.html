@@ -1,183 +1,53 @@
-// --- Start of CORRECTED <script> block ---
-
-<script>
-    // --- Core Variables ---
-    const API_BASE_URL = ''; // Uses relative path (same origin as HTML)
-    let currentToken = null; // Stores the JWT string (the actual token, not "Bearer {token}") 🐛 FIX: Store only the token
-    let currentUserRole = null;
-    let currentUsername = null; 
-
-    // --- Utility Functions ---
-
-    function setServerStatus(isOk) {
-        const statusBox = document.getElementById('server-status');
-        statusBox.classList.remove('hidden', 'bg-red-100', 'text-red-800', 'bg-green-100', 'text-green-800');
-        statusBox.classList.add(isOk ? 'bg-green-100' : 'bg-red-100', isOk ? 'text-green-800' : 'text-red-800');
-        statusBox.textContent = isOk ? '✅ Server Status: Running (Enhanced IPS Backend)' : '❌ Server Status: OFFLINE. Check Python console.';
-        statusBox.classList.remove('hidden');
-    }
-    
-    async function checkServerStatus() {
-        try {
-            // 🐛 FIX: The index route '/' returns an HTML page, not a simple 200 JSON. 
-            // We check the log-anomaly route which is public (though restricted by RBAC later). 
-            // Or just check '/' which should load the page itself. Let's use '/' since it loads the page.
-            const response = await fetch(API_BASE_URL + '/', { method: 'GET' }); 
-            setServerStatus(response.ok); 
-        } catch (error) {
-            setServerStatus(false);
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>E-IPM Secure Authentication Client</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { 
+            font-family: 'Inter', sans-serif; 
+            background-color: #f0f4f8; 
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 1rem;
         }
-    }
+        .card { 
+            box-shadow: 0 10px 30px -5px rgba(0, 0, 0, 0.1), 0 4px 10px -2px rgba(0, 0, 0, 0.04); 
+            animation: slideIn 0.6s cubic-bezier(0.25, 0.8, 0.25, 1);
+        }
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateY(-20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .text-gradient {
+            background-image: linear-gradient(90deg, #1e3a8a, #3b82f6);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+    </style>
+</head>
+<body class="flex flex-col">
 
-    function showMessage(text, isError = false) {
-        const box = document.getElementById('message-box');
-        box.innerHTML = text; // Use innerHTML to allow HTML formatting
-        box.classList.remove('hidden', 'bg-red-100', 'text-red-800', 'bg-blue-100', 'text-blue-800', 'bg-green-100', 'text-green-800', 'bg-yellow-100', 'text-yellow-800');
+    <div class="card w-full max-w-lg bg-white p-8 rounded-2xl border-t-8 border-blue-700">
+        <h1 class="text-4xl font-extrabold text-gradient mb-2 text-center">
+            Intrusion Prevention System (IPS)
+        </h1>
+        <p class="text-sm text-gray-500 mb-6 text-center">
+            MFA & RBAC with Intrusion Prevention (IPS)
+        </p>
         
-        if (isError) {
-            box.classList.add('bg-red-100', 'text-red-800');
-            console.error('API Error:', text);
-        } else if (text.includes('MFA REQUIRED') || text.includes('Password correct')) {
-            // 🐛 FIX: Update condition to match the Flask response message
-            box.classList.add('bg-blue-100', 'text-blue-800');
-        } else if (text.includes('WAF Test Successful')) {
-             box.classList.add('bg-yellow-100', 'text-yellow-800');
-        } else {
-            box.classList.add('bg-green-100', 'text-green-800');
-        }
-        box.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }
+        <div id="server-status" class="text-center text-xs p-2 rounded-lg mb-4 hidden"></div>
 
-    function clearMessage() {
-        document.getElementById('message-box').classList.add('hidden');
-    }
-
-    function escapeHtml(unsafe) {
-        if (!unsafe) return '';
-        return unsafe
-             .replace(/&/g, "&amp;")
-             .replace(/</g, "&lt;")
-             .replace(/>/g, "&gt;")
-             .replace(/"/g, "&quot;")
-             .replace(/'/g, "&#039;");
-    }
-
-
-    async function apiFetch(endpoint, method, body, token = null) {
-        clearMessage();
-        const headers = { 'Content-Type': 'application/json' };
-        if (token) {
-            // 🐛 FIX: Prepend "Bearer " here, as the token variable now only holds the raw token string
-            headers['Authorization'] = `Bearer ${token}`; 
-        }
-
-        const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-            method: method,
-            headers: headers,
-            body: body ? JSON.stringify(body) : null
-        });
-
-        let data = {};
-        try {
-            data = await response.json();
-        } catch (e) {
-            // Catch error if server returns non-JSON (like an HTML error page)
-            if (response.status === 200 && response.headers.get('content-type').includes('text/html')) {
-                throw new Error(`HTTP Error ${response.status}: Expected JSON, got HTML (Is Flask running?).`);
-            }
-            throw new Error(`HTTP Error ${response.status}: Server returned non-JSON response. ${e.message}`);
-        }
-        
-        if (!response.ok) {
-            throw new Error(data.message || `HTTP Error ${response.status}: ${response.statusText}`);
-        }
-        return data;
-    }
-
-    // --- UI Rendering (No Changes Needed Here) ---
-
-    function renderLoginUI() {
-        currentToken = null;
-        currentUserRole = null;
-        currentUsername = null;
-        document.getElementById('dashboard-container').classList.add('hidden');
-        document.getElementById('log-output').textContent = '';
-        clearMessage();
-        
-        document.getElementById('auth-flow-container').innerHTML = `
-            <form id="login-form" onsubmit="event.preventDefault(); handleLogin();" class="space-y-4">
-                <input type="text" id="login_username" placeholder="Username (e.g., admin, finance, user1)" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" autocomplete="username" required>
-                <input type="password" id="login_password" placeholder="Password" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" autocomplete="current-password" required>
-                
-                <button type="submit" class="w-full py-3 px-4 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold transition duration-150 shadow-md">
-                    Login (Step 1: Get MFA)
-                </button>
-            </form>
-
-            <div class="mt-4 pt-4 border-t border-gray-100">
-                <p class="text-sm text-center text-gray-500 mb-2">New User? Default role is 'user'.</p>
-                <button onclick="renderRegisterUI()" class="w-full py-2 px-4 rounded-lg bg-gray-500 hover:bg-gray-600 text-white font-semibold transition duration-150 shadow-sm">
-                    Go to Registration
-                </button>
+        <div id="auth-flow-container">
             </div>
-        `;
-    }
 
-    function renderRegisterUI() {
-          document.getElementById('auth-flow-container').innerHTML = `
-               <h2 class="text-2xl font-bold text-center text-gray-700 mb-4">Register New Account</h2>
-               <form id="register-form" onsubmit="event.preventDefault(); handleRegister();" class="space-y-4">
-                   <input type="text" id="reg_username" placeholder="New Username" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" required>
-                   <input type="password" id="reg_password" placeholder="Password" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" required>
-                   <input type="email" id="reg_email" placeholder="Email" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" required> 
-                   <p class="text-xs text-gray-500">Note: Role defaults to 'user'.</p>
-                   
-                   <button type="submit" class="w-full py-3 px-4 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold transition duration-150 shadow-md">
-                        Register
-                   </button>
-               </form>
-               <div class="mt-4 pt-4 border-t border-gray-100">
-                   <button onclick="renderLoginUI()" class="w-full py-2 px-4 rounded-lg bg-gray-500 hover:bg-gray-600 text-white font-semibold transition duration-150 shadow-sm">
-                        Back to Login
-                   </button>
-               </div>
-          `;
-     }
+        <div id="message-box" class="mt-6 p-4 rounded-lg text-sm transition duration-300 hidden" role="alert"></div>
 
-    function renderMFAUI(mfaCode) {
-        clearMessage();
-        
-        // Display the code clearly in the message box 
-        showMessage(`
-            🔑 **MFA REQUIRED!** Your one-time code for **${currentUsername}** is: 
-            <span class="font-extrabold text-lg bg-yellow-200 p-1 rounded-md text-red-800">${mfaCode}</span>.
-            <br>(For demonstration purposes only: code expires in 5 minutes.)
-        `, false);
-
-        document.getElementById('auth-flow-container').innerHTML = `
-            <form onsubmit="event.preventDefault(); handleVerifyMFA();" class="space-y-4">
-                <h2 class="text-2xl font-bold text-center text-teal-600">MFA Verification (Step 2)</h2>
-                <p class="text-sm text-center text-gray-600">Enter the 6-digit code from the message box above.</p>
-                <input type="text" id="otp_code" placeholder="MFA Code (e.g., 123456)" class="w-full p-4 border-2 border-teal-300 rounded-lg text-center text-xl tracking-wider focus:ring-teal-500 focus:border-teal-500" maxlength="6" required>
-                
-                <button type="submit" class="w-full py-3 px-4 rounded-lg bg-teal-600 hover:bg-teal-700 text-white font-semibold transition duration-150 shadow-md">
-                    Verify MFA (Get JWT)
-                </button>
-            </form>
-        `;
-    }
-
-    function renderDashboard() {
-        // Redraw Dashboard with updated buttons for the enhanced backend
-        document.getElementById('auth-flow-container').innerHTML = ''; 
-        document.getElementById('user-username').textContent = currentUsername;
-        document.getElementById('user-role').textContent = currentUserRole;
-        document.getElementById('dashboard-container').classList.remove('hidden');
-        showMessage('Login and MFA successful. JWT issued.', false);
-        
-        // --- Dashboard Button Update to match Flask Routes/Methods ---
-        // 🐛 FIX: Update protected route names to match your Flask app
-        const dashboardHtml = `
+        <div id="dashboard-container" class="mt-8 pt-6 border-t border-gray-200 hidden">
             <h2 class="text-xl font-bold mb-4 text-gray-800 flex items-center">
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5 mr-2 text-green-600">
                     <path fill-rule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16ZM9.53 5.47a.75.75 0 0 0-1.06 1.06l3.19 3.19-3.19 3.19a.75.75 0 1 0 1.06 1.06l4.44-4.44a.75.75 0 0 0 0-1.06l-4.44-4.44Z" clip-rule="evenodd" />
@@ -186,204 +56,311 @@
             </h2>
             
             <div class="mb-4 p-4 bg-blue-50 rounded-lg border border-blue-200">
-                <p class="text-sm text-gray-700 mb-1">Authenticated User: <span id="user-username" class="font-extrabold text-blue-800">${currentUsername}</span></p>
-                <p class="text-sm text-gray-700">Role: <span id="user-role" class="font-bold text-blue-600 uppercase">${currentUserRole}</span></p>
+                <p class="text-sm text-gray-700 mb-1">Authenticated User: <span id="user-username" class="font-extrabold text-blue-800"></span></p>
+                <p class="text-sm text-gray-700">Role: <span id="user-role" class="font-bold text-blue-600 uppercase"></span></p>
                 <p class="text-xs text-gray-500 truncate mt-2">Token Exists (Not Displayed for Security)</p>
             </div>
             
-            <h3 class="text-lg font-semibold mt-6 mb-3 text-gray-700">Protected Resources (RBAC/Rate Limit Test):</h3>
+            <h3 class="text-lg font-semibold mt-6 mb-3 text-gray-700">Protected Resources (RBAC Test):</h3>
             <div class="space-y-3">
-                <button onclick="testProtected('/data/admin-report', 'GET')" class="w-full py-2 px-4 rounded-lg bg-red-600 hover:bg-red-700 text-white font-medium transition duration-150 shadow-md">
-                    Access Admin Report (GET) - Admin Only
+                <button onclick="testProtected('/data/admin-report')" class="w-full py-2 px-4 rounded-lg bg-red-600 hover:bg-red-700 text-white font-medium transition duration-150 shadow-md">
+                    Access Admin Report 
                 </button>
-                <button onclick="testProtected('/data/finance-data', 'GET')" class="w-full py-2 px-4 rounded-lg bg-green-600 hover:bg-green-700 text-white font-medium transition duration-150 shadow-md">
-                    Access Finance Data (GET) - Finance/Admin Only
-                </button>
-                
-                <button onclick="testProtected('/data/finance-data', 'GET')" class="w-full py-2 px-4 rounded-lg bg-yellow-600 hover:bg-yellow-700 text-white font-medium transition duration-150 shadow-md">
-                    Test Rate Limit (Repeat 5 times)
+                <button onclick="testProtected('/data/finance-data')" class="w-full py-2 px-4 rounded-lg bg-green-600 hover:bg-green-700 text-white font-medium transition duration-150 shadow-md">
+                    Access Finance Data 
                 </button>
             </div>
-
-            <h3 class="text-lg font-semibold mt-6 mb-3 text-gray-700">Intrusion Prevention Tests:</h3>
-            <div class="space-y-3">
-                <button onclick="testWafAttack()" class="w-full py-2 px-4 rounded-lg bg-purple-600 hover:bg-purple-700 text-white font-medium transition duration-150 shadow-md">
-                    Test WAF Attack (SQL Injection attempt on /register)
-                </button>
-                <button onclick="fetchLogs()" class="w-full py-2 px-4 rounded-lg bg-gray-600 hover:bg-gray-700 text-white font-medium transition duration-150 shadow-md">
-                    View Security Anomalies (Public Endpoint)
-                </button>
-            </div>
-
+            
+            <h3 class="text-lg font-semibold mt-6 mb-3 text-gray-700">Intrusion Prevention Logs:</h3>
+            <button onclick="fetchLogs()" class="w-full py-2 px-4 rounded-lg bg-purple-600 hover:bg-purple-700 text-white font-medium transition duration-150 shadow-md">
+                View Security Anomalies (IPS)
+            </button>
             <pre id="log-output" class="mt-3 p-3 h-48 bg-gray-800 text-yellow-400 text-xs overflow-y-scroll rounded-lg border border-gray-700"></pre>
 
             <button onclick="logout()" class="w-full mt-6 py-2 px-4 rounded-lg bg-gray-300 hover:bg-gray-400 text-gray-800 font-medium transition duration-150 shadow-md">
                 Logout
             </button>
-        `;
-        document.getElementById('dashboard-container').innerHTML = dashboardHtml;
-        fetchLogs(); 
-    }
+        </div>
+    </div>
 
-    // --- API Handlers (SYNCHRONIZED WITH FLASK BACKEND) ---
+    <script>
+        // --- Core Variables ---
+        const API_BASE_URL = ''; // Uses relative path (same origin as HTML)
+        let currentToken = null;
+        let currentUserRole = null;
+        let currentUsername = null; 
 
-    async function handleRegister() {
-        const username = document.getElementById('reg_username').value;
-        const password = document.getElementById('reg_password').value;
-        const email = document.getElementById('reg_email').value || 'placeholder@example.com'; // 🐛 FIX: Email must be included
+        // --- Utility Functions ---
 
-        try {
-            const data = await apiFetch('/register', 'POST', { username, password, email }); 
-            showMessage(data.message, false);
-            renderLoginUI();
-        } catch (error) {
-            showMessage(`Registration Error: ${error.message}`, true);
+        function setServerStatus(isOk) {
+            const statusBox = document.getElementById('server-status');
+            statusBox.classList.remove('hidden', 'bg-red-100', 'text-red-800', 'bg-green-100', 'text-green-800');
+            statusBox.classList.add(isOk ? 'bg-green-100' : 'bg-red-100', isOk ? 'text-green-800' : 'text-red-800');
+            statusBox.textContent = isOk ? '✅ Server Status: Running' : '❌ Server Status: OFFLINE. Check Render logs or deployment status.';
         }
-    }
-
-    async function handleLogin() {
-        const username = document.getElementById('login_username').value;
-        const password = document.getElementById('login_password').value;
-
-        try {
-            const data = await apiFetch('/login', 'POST', { username, password });
-
-            // 🐛 FIX: Backend sends the code in 'mfa_code_for_demo'
-            if (data.mfa_code_for_demo) {
-                currentUsername = username;
-                const mfaCode = data.mfa_code_for_demo; 
-                showMessage(data.message + '. Code generated.', false);
-                renderMFAUI(mfaCode);
-            } else {
-                showMessage(data.message, false);
+        
+        async function checkServerStatus() {
+            try {
+                // FIX: Checking the root route (/) is the most reliable way to check if the Flask server is up.
+                const response = await fetch(API_BASE_URL + '/', { method: 'GET' }); 
+                setServerStatus(response.ok); 
+            } catch (error) {
+                setServerStatus(false);
             }
-        } catch (error) {
-            showMessage(`Login Error: ${error.message}`, true);
-        }
-    }
-
-    async function handleVerifyMFA() {
-        const otp_code = document.getElementById('otp_code').value; 
-
-        if (!currentUsername || !otp_code) {
-            showMessage('Error: Missing username or MFA code.', true);
-            return;
         }
 
-        try {
-            // 🐛 FIX: Backend expects 'otp_code' in the body
-            const data = await apiFetch('/verify-mfa', 'POST', { username: currentUsername, otp_code: otp_code });
+        function showMessage(text, isError = false) {
+            const box = document.getElementById('message-box');
+            box.innerHTML = text; // Use innerHTML to allow HTML formatting
+            box.classList.remove('hidden', 'bg-red-100', 'text-red-800', 'bg-blue-100', 'text-blue-800', 'bg-green-100', 'text-green-800');
             
-            // 🐛 FIX: Backend sends the token in 'access_token' and role in 'role'
-            currentToken = data.access_token; 
-            currentUserRole = data.role; 
-
-            // NO NEED for client-side token decoding with the corrected backend response.
-
-            renderDashboard();
-        } catch (error) {
-            showMessage(`MFA Error: ${error.message}`, true);
-        }
-    }
-
-    async function testProtected(endpoint, method, body = null) {
-        if (!currentToken) {
-            showMessage('Error: You must be logged in to test protected routes.', true);
-            return;
-        }
-
-        try {
-            const data = await apiFetch(endpoint, method, body, currentToken);
-            // 🐛 FIX: Check data keys that your Flask backend sends on success
-            let message = `${data.message} ${data.data ? 'Data: ' + JSON.stringify(data.data) : ''}`;
-            showMessage(message, false);
-        } catch (error) {
-            // This catches RBAC failures, Velocity Anomalies, and WAF blocks
-            showMessage(`Access/Security Check Failed: **${error.message}**`, true);
-            fetchLogs(); // Fetch logs to see the CRITICAL/ALERT triggered
-        }
-    }
-    
-    // --- NEW FUNCTION TO TEST WAF ---
-    async function testWafAttack() {
-        // We will test the WAF decorator logic on the public '/register' route 
-        // to see if the Flask WAF decorator blocks it based on the malicious payload.
-        const endpoint = '/register'; 
-        const body = { 
-            username: 'sqltest',
-            password: 'password',
-            email: "hacked@example.com' OR '1'='1" // SQL Injection attempt in email field
-        };
-
-        try {
-            // This call should fail if WAF is working
-            const data = await apiFetch(endpoint, 'POST', body, currentToken);
-            showMessage(`WAF Attack Test (Unexpected Success): ${data.message}`, true); 
-        } catch (error) {
-            // We EXPECT this to fail if the WAF catches the signature in the body
-            if (error.message.includes('Malicious signature detected')) {
-                // 🐛 NOTE: Since the WAF is on a decorator, it's more common to test it on a protected route like /data/admin-report.
-                // However, since we don't have a POST body route, we test /register, but this assumes you've added the WAF decorator to /register.
-                showMessage(`✅ WAF Test Successful! Server blocked the request: **${error.message}**`, false);
+            if (isError) {
+                box.classList.add('bg-red-100', 'text-red-800');
+                console.error('API Error:', text);
+            } else if (text.includes('MFA REQUIRED')) {
+                box.classList.add('bg-blue-100', 'text-blue-800');
             } else {
-                showMessage(`WAF Test Failed (Different Error): ${error.message}`, true);
+                box.classList.add('bg-green-100', 'text-green-800');
             }
-            fetchLogs(); 
+            box.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
-    }
+
+        function clearMessage() {
+            document.getElementById('message-box').classList.add('hidden');
+        }
+
+        function escapeHtml(unsafe) {
+            if (!unsafe) return '';
+            return unsafe
+                 .replace(/&/g, "&amp;")
+                 .replace(/</g, "&lt;")
+                 .replace(/>/g, "&gt;")
+                 .replace(/"/g, "&quot;")
+                 .replace(/'/g, "&#039;");
+        }
 
 
-    async function fetchLogs() {
-        // 🐛 NOTE: Your Flask route /data/log-anomaly does NOT require a token (it's public)
-        // and it returns the log list directly, not under a 'logs' key.
+        async function apiFetch(endpoint, method, body, token = null) {
+            clearMessage();
+            const headers = { 'Content-Type': 'application/json' };
+            if (token) {
+                headers['Authorization'] = `Bearer ${token}`;
+            }
 
-        try {
-            const logData = await apiFetch('/data/log-anomaly', 'GET', null, null); // 🐛 FIX: Removed currentToken
+            const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+                method: method,
+                headers: headers,
+                body: body ? JSON.stringify(body) : null
+            });
+
+            let data = {};
+            try {
+                data = await response.json();
+            } catch (e) {
+                throw new Error(`HTTP Error ${response.status}: Server returned non-JSON response.`);
+            }
             
-            // logData is now the list of logs
-            const logs = logData; 
-            const logOutput = document.getElementById('log-output');
+            if (!response.ok) {
+                throw new Error(data.message || `HTTP Error ${response.status}: ${response.statusText}`);
+            }
+            return data;
+        }
+
+        // --- UI Rendering ---
+
+        function renderLoginUI() {
+            currentToken = null;
+            currentUserRole = null;
+            currentUsername = null;
+            document.getElementById('dashboard-container').classList.add('hidden');
+            document.getElementById('log-output').textContent = '';
+            clearMessage();
             
-            if (logs && logs.length > 0) {
-                const formattedLogs = logs.map(log => {
-                    const time = new Date(log.timestamp).toLocaleTimeString();
+            document.getElementById('auth-flow-container').innerHTML = `
+                <form id="login-form" onsubmit="event.preventDefault(); handleLogin();" class="space-y-4">
+                    <input type="text" id="login_username" placeholder="Username (e.g., admin, finance)" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" autocomplete="username" required>
+                    <input type="password" id="login_password" placeholder="Password" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" autocomplete="current-password" required>
                     
-                    let color = 'text-green-400';
-                    if (log.level === 'WARNING') color = 'text-yellow-400';
-                    if (log.level === 'ALERT') color = 'text-orange-400';
-                    if (log.level === 'CRITICAL') color = 'text-red-400 font-extrabold';
+                    <button type="submit" class="w-full py-3 px-4 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold transition duration-150 shadow-md">
+                        Login
+                    </button>
+                </form>
 
-                    const escapedMessage = escapeHtml(log.message);
-
-                    // 🐛 FIX: Backend sends log_type, not event_type
-                    return `<span class="${color}">[${time} | ${log.level} | ${log.log_type}]</span> ${escapedMessage} (IP: ${log.source_ip})`;
-                }).join('\n');
-                
-                logOutput.innerHTML = formattedLogs;
-            } else {
-                logOutput.textContent = 'No recent log entries found.';
-            }
-            
-            showMessage('Security logs fetched successfully.', false); // 🐛 FIX: Message is not in the response body
-        } catch (error) {
-            showMessage(`Log Fetch Error: ${error.message}`, true);
+                <div class="mt-4 pt-4 border-t border-gray-100">
+                    <p class="text-sm text-center text-gray-500 mb-2">New User? They will receive role 'Non-admin role'.</p>
+                    <button onclick="renderRegisterUI()" class="w-full py-2 px-4 rounded-lg bg-gray-500 hover:bg-gray-600 text-white font-semibold transition duration-150 shadow-sm">
+                        Go to Registration
+                    </button>
+                </div>
+            `;
         }
-    }
 
-    function logout() {
-        currentToken = null;
-        currentUserRole = null;
-        currentUsername = null;
-        showMessage('Logged out successfully.', false);
-        renderLoginUI();
-    }
+        function renderRegisterUI() {
+             document.getElementById('auth-flow-container').innerHTML = `
+                <h2 class="text-2xl font-bold text-center text-gray-700 mb-4">Register New Account</h2>
+                <form id="register-form" onsubmit="event.preventDefault(); handleRegister();" class="space-y-4">
+                    <input type="text" id="reg_username" placeholder="New Username" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" required>
+                    <input type="password" id="reg_password" placeholder="Password" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" required>
+                    <input type="email" id="reg_email" placeholder="Email Address" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" required>
+                    <p class="text-xs text-gray-500">Note: Backend currently forces role to 'non-admin'.</p>
+                    
+                    <button type="submit" class="w-full py-3 px-4 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold transition duration-150 shadow-md">
+                        Register
+                    </button>
+                </form>
+                <div class="mt-4 pt-4 border-t border-gray-100">
+                    <button onclick="renderLoginUI()" class="w-full py-2 px-4 rounded-lg bg-gray-500 hover:bg-gray-600 text-white font-semibold transition duration-150 shadow-sm">
+                        Back to Login
+                    </button>
+                </div>
+            `;
+        }
 
-    // --- Initialization ---
-    document.addEventListener('DOMContentLoaded', () => {
-        checkServerStatus();
-        renderLoginUI();
-    });
 
-</script>
+        function renderMFAUI(mfaCode) {
+            clearMessage();
+            
+            // Display the code clearly in the message box 
+            showMessage(`
+                🔑 **MFA REQUIRED!** Your one-time code for **${currentUsername}** is: 
+                <span class="font-extrabold text-lg bg-yellow-200 p-1 rounded-md text-red-800">${mfaCode}</span>.
+                <br>(For demonstration purposes only: normally this would be sent privately.)
+            `, false);
 
-// --- End of CORRECTED <script> block ---
+            document.getElementById('auth-flow-container').innerHTML = `
+                <form onsubmit="event.preventDefault(); handleVerifyMFA();" class="space-y-4">
+                    <h2 class="text-2xl font-bold text-center text-teal-600">MFA Verification</h2>
+                    <p class="text-sm text-center text-gray-600">Enter the 6-character hex code from the message box above.</p>
+                    <input type="text" id="otp_code" placeholder="MFA Code (e.g., A1B2C3)" class="w-full p-4 border-2 border-teal-300 rounded-lg text-center text-xl tracking-wider focus:ring-teal-500 focus:border-teal-500" maxlength="6" required>
+                    
+                    <button type="submit" class="w-full py-3 px-4 rounded-lg bg-teal-600 hover:bg-teal-700 text-white font-semibold transition duration-150 shadow-md">
+                        Verify MFA (Step 2: Token)
+                    </button>
+                </form>
+            `;
+        }
+
+        function renderDashboard() {
+            document.getElementById('auth-flow-container').innerHTML = ''; 
+            document.getElementById('user-username').textContent = currentUsername;
+            document.getElementById('user-role').textContent = currentUserRole;
+            document.getElementById('dashboard-container').classList.remove('hidden');
+            showMessage('Login and MFA successful. JWT issued.', false);
+            fetchLogs(); // Automatically fetch logs on successful login
+        }
+
+        // --- API Handlers ---
+
+        async function handleRegister() {
+            const username = document.getElementById('reg_username').value;
+            const password = document.getElementById('reg_password').value;
+            const email = document.getElementById('reg_email').value;
+
+            try {
+                const data = await apiFetch('/register', 'POST', { username, password, email, role: 'user' }); 
+                showMessage(data.message, false);
+                renderLoginUI();
+            } catch (error) {
+                showMessage(`Registration Error: ${error.message}`, true);
+            }
+        }
+
+        async function handleLogin() {
+            const username = document.getElementById('login_username').value;
+            const password = document.getElementById('login_password').value;
+
+            try {
+                const data = await apiFetch('/login', 'POST', { username, password });
+
+                if (data.status === 'pending_mfa') {
+                    currentUsername = data.username;
+                    const mfaCode = data.mfa_code_for_demo; 
+                    renderMFAUI(mfaCode);
+                } else {
+                    showMessage(data.message, false);
+                }
+            } catch (error) {
+                showMessage(`Login Error: ${error.message}`, true);
+            }
+        }
+
+        async function handleVerifyMFA() {
+            const otp_code = document.getElementById('otp_code').value.toUpperCase();
+
+            if (!currentUsername || !otp_code) {
+                showMessage('Error: Missing username or MFA code.', true);
+                return;
+            }
+
+            try {
+                const data = await apiFetch('/verify-mfa', 'POST', { username: currentUsername, otp_code });
+                
+                currentToken = data.access_token;
+                currentUserRole = data.role;
+                
+                renderDashboard();
+            } catch (error) {
+                showMessage(`MFA Error: ${error.message}`, true);
+            }
+        }
+
+        async function testProtected(endpoint) {
+            if (!currentToken) {
+                showMessage('Error: You must be logged in to test protected routes.', true);
+                return;
+            }
+
+            try {
+                const data = await apiFetch(endpoint, 'GET', null, currentToken);
+                let message = `${data.message} Data: ${JSON.stringify(data.data)}`;
+                showMessage(message, false);
+            } catch (error) {
+                showMessage(`RBAC Check Failed: ${error.message}`, true);
+            }
+        }
+
+        async function fetchLogs() {
+            try {
+                const logs = await apiFetch('/data/log-anomaly', 'GET', null);
+                const logOutput = document.getElementById('log-output');
+                
+                if (logs && logs.length > 0) {
+                    const formattedLogs = logs.map(log => {
+                        const time = new Date(log.timestamp).toLocaleTimeString();
+                        
+                        let color = 'text-green-400';
+                        if (log.level === 'WARNING') color = 'text-yellow-400';
+                        if (log.level === 'CRITICAL' || log.level === 'ALERT') color = 'text-red-400';
+
+                        const escapedMessage = escapeHtml(log.message);
+
+                        return `<span class="${color}">[${time} | ${log.type}]</span> ${escapedMessage}`;
+                    }).join('\n');
+                    
+                    logOutput.innerHTML = formattedLogs;
+                } else {
+                    logOutput.textContent = 'No security anomaly log entries found yet.';
+                }
+                
+                showMessage('Latest security logs retrieved successfully.', false);
+            } catch (error) {
+                showMessage(`Log Fetch Error: ${error.message}`, true);
+            }
+        }
+
+        function logout() {
+            currentToken = null;
+            currentUserRole = null;
+            showMessage('Logged out successfully.', false);
+            renderLoginUI();
+        }
+
+        // --- Initialization ---
+        document.addEventListener('DOMContentLoaded', () => {
+            checkServerStatus();
+            renderLoginUI();
+        });
+
+    </script>
+</body>
+</html>
