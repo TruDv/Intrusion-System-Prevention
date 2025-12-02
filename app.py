@@ -17,11 +17,11 @@ import secrets
 # --- Configuration ---
 class Config:
     # Database Configuration
-    # Uses SQLite (intrusion_system.db)
     SQLALCHEMY_DATABASE_URI = 'sqlite:///intrusion_system.db'
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     
     # Security Configuration
+    # NOTE: Set a secure, long string in Render's Environment Variables (SECRET_KEY)
     SECRET_KEY = os.environ.get('SECRET_KEY', 'default_strong_secret_key_for_demonstrator_only') 
     JWT_ALGORITHM = 'HS256'
     JWT_EXPIRY_DAYS = 7
@@ -30,14 +30,14 @@ class Config:
     MFA_CODE_EXPIRY_SECONDS = 300 # 5 minutes
     
     # Intrusion Prevention (Rate Limiter) Settings
-    MAX_LOGIN_ATTEMPTS = 5
-    RATE_LIMIT_WINDOW_SECONDS = 60 # Window to track failures
+    MAX_LOGIN_ATTEMPTS = 5 # Blocks on the 5th failure
+    RATE_LIMIT_WINDOW_SECONDS = 60 # Window to track failures (60 seconds)
 
 # --- Flask App Initialization ---
 app = Flask(__name__)
 app.config.from_object(Config)
 
-# Enable CORS (necessary for frontend communication, even though Flask serves the HTML)
+# Enable CORS 
 CORS(app)
 
 # Database Initialization
@@ -64,7 +64,7 @@ class User(db.Model):
         return check_password_hash(self.password_hash, password)
 
 class SecurityLog(db.Model):
-    """Simulates logging of system events or anomalies."""
+    """Logs system events, failures, and security anomalies."""
     id = db.Column(db.Integer, primary_key=True)
     # Always store timestamps as UTC
     timestamp = db.Column(db.DateTime, default=datetime.now(timezone.utc)) 
@@ -91,7 +91,6 @@ def log_security_event(level, message, log_type):
 def generate_jwt_token(user):
     """Generates an access token with user data and role."""
     now = datetime.now(timezone.utc)
-    # Token payload includes username, ID, role, and expiration (exp)
     payload = {
         'exp': now + timedelta(days=app.config['JWT_EXPIRY_DAYS']),
         'iat': now,
@@ -108,9 +107,7 @@ def generate_jwt_token(user):
     return token
 
 def token_required(roles=[]):
-    """
-    Decorator to protect routes and enforce role-based access control (RBAC).
-    """
+    """Decorator to protect routes and enforce Role-Based Access Control (RBAC)."""
     def decorator(f):
         @wraps(f)
         def decorated(*args, **kwargs):
@@ -168,27 +165,29 @@ def check_rate_limit(username=None):
     source_ip = request.remote_addr
     time_window = datetime.now(timezone.utc) - timedelta(seconds=app.config['RATE_LIMIT_WINDOW_SECONDS'])
     
-    # 1. Check IP-based failures
+    # 1. Check IP-based failures (all users from this IP)
     ip_failures = SecurityLog.query.filter(
         SecurityLog.log_type == 'AUTH_FAILURE',
         SecurityLog.source_ip == source_ip,
         SecurityLog.timestamp >= time_window
     ).count()
 
+    # NOTE: Block occurs when count hits the MAX_LOGIN_ATTEMPTS (i.e., the 5th attempt is blocked)
     if ip_failures >= app.config['MAX_LOGIN_ATTEMPTS']:
-        log_security_event('ALERT', f'Rate Limit Triggered. IP {source_ip} blocked.', 'RATE_LIMIT')
+        log_security_event('ALERT', f'Rate Limit Triggered. IP {source_ip} blocked.', 'RATE_LIMIT_IP')
         return True
     
-    # 2. Check Username-based failures
+    # 2. Check Username-based failures (specific user lockout)
     if username:
         user_failures = SecurityLog.query.filter(
             SecurityLog.log_type == 'AUTH_FAILURE',
-            SecurityLog.message.like(f'%User: {username}%'),
+            # Search message for the username to find relevant failures
+            SecurityLog.message.like(f'%User: {username}%'), 
             SecurityLog.timestamp >= time_window
         ).count()
         
         if user_failures >= app.config['MAX_LOGIN_ATTEMPTS']:
-            log_security_event('ALERT', f'Rate Limit Triggered. Username {username} blocked.', 'RATE_LIMIT')
+            log_security_event('ALERT', f'Rate Limit Triggered. Username {username} blocked.', 'RATE_LIMIT_USER')
             return True
 
     return False
@@ -196,15 +195,11 @@ def check_rate_limit(username=None):
 # --- Database Initialization Function ---
 
 def create_db_and_users():
-    """Creates the database and adds an initial admin user for testing."""
-    # This function must be run within the application context.
-    
-    # NOTE: db.drop_all() is included for a clean demo environment, 
-    # but should be removed in a non-ephemeral/production environment.
-    db.drop_all() 
+    """Creates the database and adds initial users."""
+    db.drop_all() # Good for ephemeral demo environment
     db.create_all()
 
-    # Create default users for easy testing
+    # Create default users
     if User.query.filter_by(username='admin').first() is None:
         admin_user = User(username='admin', email='admin@demo.com', role='admin')
         admin_user.set_password('securepassword')
@@ -234,30 +229,6 @@ def index():
     """Serves the main HTML client (index.html)."""
     return render_template('index.html') 
 
-@app.route('/register', methods=['POST'])
-def register_user():
-    """Route to create a new user account."""
-    data = request.get_json()
-    username = data.get('username')
-    password = data.get('password')
-    email = data.get('email')
-
-    if not all([username, password, email]):
-        return jsonify({'message': 'Missing required fields (username, password, email)'}), 400
-
-    if User.query.filter_by(username=username).first() or User.query.filter_by(email=email).first():
-        return jsonify({'message': 'User already exists.'}), 409
-
-    # Assign 'admin' role for easy testing with the frontend
-    new_user = User(username=username, email=email, role='admin')
-    new_user.set_password(password)
-    
-    db.session.add(new_user)
-    db.session.commit()
-    
-    log_security_event('INFO', f'New user registered: {username} with role admin.', 'USER_CREATED')
-    return jsonify({'message': 'User registered successfully. Default role is "admin".'}), 201
-
 @app.route('/login', methods=['POST'])
 def login():
     """Step 1: Authenticates user and initiates MFA by generating a code."""
@@ -283,15 +254,13 @@ def login():
         
         log_security_event('INFO', f'User {username} authenticated primary password. Awaiting MFA.', 'AUTH_PENDING_MFA')
         
-        # NOTE: Print MFA code to console for demo (Visible in Render logs)
         print(f"\n--- MFA Code for {username}: {mfa_code} --- (Expires in 5 minutes)\n")
 
         return jsonify({
             'message': 'Password correct. MFA code sent. Proceed to /verify-mfa',
             'status': 'pending_mfa',
             'username': user.username,
-            # *** CRITICAL FOR FRONTEND DEMO ***
-            'mfa_code_for_demo': mfa_code 
+            'mfa_code_for_demo': mfa_code # Sends code to frontend for easy demo
             
         }), 200
 
@@ -316,7 +285,7 @@ def verify_mfa():
         
     now = datetime.now(timezone.utc)
     
-    # Must convert the DB time to be timezone-aware (UTC) for comparison with 'now'
+    # Make DB time timezone-aware for correct comparison
     mfa_expiry_aware = None
     if user.mfa_code_expiry:
         mfa_expiry_aware = user.mfa_code_expiry.replace(tzinfo=timezone.utc)
@@ -350,22 +319,16 @@ def get_admin_report():
     """Access control test: Requires 'admin' role."""
     return jsonify({
         'message': f'Admin Report Accessed Successfully by {g.current_user.username} (Role: {g.current_user.role}).',
-        'data': [
-            {'metric': 'Total Users', 'value': 1024}, 
-            {'metric': 'New Incidents (Past 24h)', 'value': 3}
-        ]
+        'data': {'metric': 'New Incidents (Past 24h)', 'value': 3}
     })
 
 @app.route('/data/finance-data', methods=['GET'])
-@token_required(roles=['finance'])
+@token_required(roles=['finance', 'admin'])
 def get_finance_data():
-    """Access control test: Requires 'finance' role."""
+    """Access control test: Requires 'finance' or 'admin' role."""
     return jsonify({
         'message': f'Finance Data Accessed Successfully by {g.current_user.username} (Role: {g.current_user.role}).',
-        'data': [
-            {'metric': 'Q3 Revenue', 'value': '$12.5M'}, 
-            {'metric': 'Budget Variance', 'value': '$-0.8M'}
-        ]
+        'data': {'metric': 'Q3 Revenue', 'value': '$12.5M'}
     })
 
 # --- Public Route (Intrusion Log Display) ---
@@ -384,12 +347,3 @@ def get_security_logs():
     } for log in logs]
 
     return jsonify(log_list), 200
-
-# --- Local Debugging Startup (Optional, remove for deployment) ---
-
-# if __name__ == '__main__':
-#     # This block is ignored by Gunicorn in production
-#     with app.app_context():
-#         create_db_and_users()
-#     print("\n--- Starting Flask Server on http://127.0.0.1:5000 ---")
-#     app.run(debug=True)
