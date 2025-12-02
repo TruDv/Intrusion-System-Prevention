@@ -124,7 +124,7 @@ def token_required(roles=[]):
             try:
                 data = jwt.decode(
                     token, 
-                    app.config['SECRET_KEY'],
+                    app.config['SECRET_KEY'], 
                     algorithms=[app.config['JWT_ALGORITHM']]
                 )
                 current_user = User.query.filter_by(username=data['username']).first()

@@ -101,8 +101,9 @@
         
         async function checkServerStatus() {
             try {
-                const response = await fetch(API_BASE_URL + '/register', { method: 'OPTIONS' });
-                setServerStatus(response.ok || response.status === 405);
+                // FIX: Checking the root route (/) is the most reliable way to check if the Flask server is up.
+                const response = await fetch(API_BASE_URL + '/', { method: 'GET' }); 
+                setServerStatus(response.ok); 
             } catch (error) {
                 setServerStatus(false);
             }
@@ -156,12 +157,10 @@
             try {
                 data = await response.json();
             } catch (e) {
-                // Handle cases where server returns a non-JSON 500 page
                 throw new Error(`HTTP Error ${response.status}: Server returned non-JSON response.`);
             }
             
             if (!response.ok) {
-                // If it's a Rate Limit error (429) or other custom message
                 throw new Error(data.message || `HTTP Error ${response.status}: ${response.statusText}`);
             }
             return data;
