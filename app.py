@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 
 # Database and Server Imports
-from flask import Flask, request, jsonify, g
+from flask import Flask, request, jsonify, g, render_template  # <-- ADDED render_template
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 
@@ -213,11 +213,9 @@ def check_rate_limit(username=None):
 
 @app.route('/', methods=['GET'])
 def index():
-    """A simple index route to verify the server is running."""
-    return jsonify({
-        "message": "E-IPM Backend Demonstrator is running.",
-        "endpoints": ["/register", "/login", "/verify-mfa", "/data/admin-report", "/data/finance-data", "/data/log-anomaly"]
-    })
+    """Serves the main HTML client (index.html)."""
+    # The frontend is now served by the backend, simplifying deployment and CORS
+    return render_template('index.html') 
 
 @app.route('/register', methods=['POST'])
 def register_user():
@@ -280,7 +278,6 @@ def login():
 
     # If login fails (user not found or wrong password)
     log_security_event('WARNING', f'Login failed for User: {username}.', 'AUTH_FAILURE')
-    # Use a generic error message to prevent enumeration attacks
     return jsonify({'message': 'Invalid credentials or account blocked by IPS.'}), 401
 
 @app.route('/verify-mfa', methods=['POST'])
@@ -301,11 +298,9 @@ def verify_mfa():
     now = datetime.now(timezone.utc)
     
     # --- TIMEZONE FIX ---
-    # The datetime retrieved from the DB (user.mfa_code_expiry) is often offset-naive.
-    # We must make it offset-aware (UTC) for comparison with the offset-aware 'now'.
+    # Convert the offset-naive DB value to offset-aware (UTC) for comparison with 'now'
     mfa_expiry_aware = None
     if user.mfa_code_expiry:
-        # Attach the UTC timezone information
         mfa_expiry_aware = user.mfa_code_expiry.replace(tzinfo=timezone.utc)
     # --- END FIX ---
 
@@ -418,4 +413,5 @@ def create_db_and_users():
 if __name__ == '__main__':
     create_db_and_users()
     print("\n--- Starting Flask Server ---")
+    # For local dev, using debug=True is fine. For deployment, gunicorn handles execution.
     app.run(debug=True)
