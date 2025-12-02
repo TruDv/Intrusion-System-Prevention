@@ -1,9 +1,6 @@
 Flask
-Flask-JWT-Extended
-Flask-Limiter
 Flask-CORS
-PyJWT
-python-dotenv  # If you use a .env file for SECRET_KEY
-gunicorn        # Essential for production deployment (Render/Heroku)
-pyotp           # For MFA
-bcrypt
+Flask-SQLAlchemy  <-- ADDED: Fixes the 'ModuleNotFoundError'
+gunicorn
+pyjwt
+werkzeug
