@@ -1,9 +1,9 @@
-// --- Start of UPDATED <script> block ---
+// --- Start of CORRECTED <script> block ---
 
 <script>
     // --- Core Variables ---
     const API_BASE_URL = ''; // Uses relative path (same origin as HTML)
-    let currentToken = null; // Stores the JWT string in "Bearer {token}" format for easy use
+    let currentToken = null; // Stores the JWT string (the actual token, not "Bearer {token}") 🐛 FIX: Store only the token
     let currentUserRole = null;
     let currentUsername = null; 
 
@@ -19,6 +19,9 @@
     
     async function checkServerStatus() {
         try {
+            // 🐛 FIX: The index route '/' returns an HTML page, not a simple 200 JSON. 
+            // We check the log-anomaly route which is public (though restricted by RBAC later). 
+            // Or just check '/' which should load the page itself. Let's use '/' since it loads the page.
             const response = await fetch(API_BASE_URL + '/', { method: 'GET' }); 
             setServerStatus(response.ok); 
         } catch (error) {
@@ -34,7 +37,8 @@
         if (isError) {
             box.classList.add('bg-red-100', 'text-red-800');
             console.error('API Error:', text);
-        } else if (text.includes('MFA REQUIRED') || text.includes('Password successful')) {
+        } else if (text.includes('MFA REQUIRED') || text.includes('Password correct')) {
+            // 🐛 FIX: Update condition to match the Flask response message
             box.classList.add('bg-blue-100', 'text-blue-800');
         } else if (text.includes('WAF Test Successful')) {
              box.classList.add('bg-yellow-100', 'text-yellow-800');
@@ -63,8 +67,8 @@
         clearMessage();
         const headers = { 'Content-Type': 'application/json' };
         if (token) {
-            // Send the token exactly as received from the server (e.g., "Bearer {token}")
-            headers['Authorization'] = token; 
+            // 🐛 FIX: Prepend "Bearer " here, as the token variable now only holds the raw token string
+            headers['Authorization'] = `Bearer ${token}`; 
         }
 
         const response = await fetch(`${API_BASE_URL}${endpoint}`, {
@@ -77,7 +81,11 @@
         try {
             data = await response.json();
         } catch (e) {
-            throw new Error(`HTTP Error ${response.status}: Server returned non-JSON response.`);
+            // Catch error if server returns non-JSON (like an HTML error page)
+            if (response.status === 200 && response.headers.get('content-type').includes('text/html')) {
+                throw new Error(`HTTP Error ${response.status}: Expected JSON, got HTML (Is Flask running?).`);
+            }
+            throw new Error(`HTTP Error ${response.status}: Server returned non-JSON response. ${e.message}`);
         }
         
         if (!response.ok) {
@@ -86,7 +94,7 @@
         return data;
     }
 
-    // --- UI Rendering ---
+    // --- UI Rendering (No Changes Needed Here) ---
 
     function renderLoginUI() {
         currentToken = null;
@@ -116,23 +124,24 @@
     }
 
     function renderRegisterUI() {
-         document.getElementById('auth-flow-container').innerHTML = `
-             <h2 class="text-2xl font-bold text-center text-gray-700 mb-4">Register New Account</h2>
-             <form id="register-form" onsubmit="event.preventDefault(); handleRegister();" class="space-y-4">
-                 <input type="text" id="reg_username" placeholder="New Username" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" required>
-                 <input type="password" id="reg_password" placeholder="Password" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" required>
-                 <p class="text-xs text-gray-500">Note: Role defaults to 'user'.</p>
-                 
-                 <button type="submit" class="w-full py-3 px-4 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold transition duration-150 shadow-md">
-                     Register
-                 </button>
-             </form>
-             <div class="mt-4 pt-4 border-t border-gray-100">
-                 <button onclick="renderLoginUI()" class="w-full py-2 px-4 rounded-lg bg-gray-500 hover:bg-gray-600 text-white font-semibold transition duration-150 shadow-sm">
-                     Back to Login
-                 </button>
-             </div>
-         `;
+          document.getElementById('auth-flow-container').innerHTML = `
+               <h2 class="text-2xl font-bold text-center text-gray-700 mb-4">Register New Account</h2>
+               <form id="register-form" onsubmit="event.preventDefault(); handleRegister();" class="space-y-4">
+                   <input type="text" id="reg_username" placeholder="New Username" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" required>
+                   <input type="password" id="reg_password" placeholder="Password" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" required>
+                   <input type="email" id="reg_email" placeholder="Email" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" required> 
+                   <p class="text-xs text-gray-500">Note: Role defaults to 'user'.</p>
+                   
+                   <button type="submit" class="w-full py-3 px-4 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold transition duration-150 shadow-md">
+                        Register
+                   </button>
+               </form>
+               <div class="mt-4 pt-4 border-t border-gray-100">
+                   <button onclick="renderLoginUI()" class="w-full py-2 px-4 rounded-lg bg-gray-500 hover:bg-gray-600 text-white font-semibold transition duration-150 shadow-sm">
+                        Back to Login
+                   </button>
+               </div>
+          `;
      }
 
     function renderMFAUI(mfaCode) {
@@ -167,6 +176,7 @@
         showMessage('Login and MFA successful. JWT issued.', false);
         
         // --- Dashboard Button Update to match Flask Routes/Methods ---
+        // 🐛 FIX: Update protected route names to match your Flask app
         const dashboardHtml = `
             <h2 class="text-xl font-bold mb-4 text-gray-800 flex items-center">
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-5 h-5 mr-2 text-green-600">
@@ -181,29 +191,27 @@
                 <p class="text-xs text-gray-500 truncate mt-2">Token Exists (Not Displayed for Security)</p>
             </div>
             
-            <h3 class="text-lg font-semibold mt-6 mb-3 text-gray-700">Protected Resources (RBAC/WAF/Velocity Test):</h3>
+            <h3 class="text-lg font-semibold mt-6 mb-3 text-gray-700">Protected Resources (RBAC/Rate Limit Test):</h3>
             <div class="space-y-3">
-                <button onclick="testProtected('/data/user-profile', 'GET')" class="w-full py-2 px-4 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-medium transition duration-150 shadow-md">
-                    Access User Profile (GET)
+                <button onclick="testProtected('/data/admin-report', 'GET')" class="w-full py-2 px-4 rounded-lg bg-red-600 hover:bg-red-700 text-white font-medium transition duration-150 shadow-md">
+                    Access Admin Report (GET) - Admin Only
                 </button>
-                <button onclick="testProtected('/data/finance-report', 'GET')" class="w-full py-2 px-4 rounded-lg bg-green-600 hover:bg-green-700 text-white font-medium transition duration-150 shadow-md">
-                    Access Finance Report (GET)
+                <button onclick="testProtected('/data/finance-data', 'GET')" class="w-full py-2 px-4 rounded-lg bg-green-600 hover:bg-green-700 text-white font-medium transition duration-150 shadow-md">
+                    Access Finance Data (GET) - Finance/Admin Only
                 </button>
-                <button onclick="testProtected('/data/admin-report', 'POST', {action: 'Deploy Critical Update'})" class="w-full py-2 px-4 rounded-lg bg-red-600 hover:bg-red-700 text-white font-medium transition duration-150 shadow-md">
-                    Access Admin Report (POST)
-                </button>
-                <button onclick="testProtected('/data/high-value-asset', 'GET')" class="w-full py-2 px-4 rounded-lg bg-yellow-600 hover:bg-yellow-700 text-white font-medium transition duration-150 shadow-md">
-                    Access High-Value Asset (Velocity Test)
+                
+                <button onclick="testProtected('/data/finance-data', 'GET')" class="w-full py-2 px-4 rounded-lg bg-yellow-600 hover:bg-yellow-700 text-white font-medium transition duration-150 shadow-md">
+                    Test Rate Limit (Repeat 5 times)
                 </button>
             </div>
 
             <h3 class="text-lg font-semibold mt-6 mb-3 text-gray-700">Intrusion Prevention Tests:</h3>
             <div class="space-y-3">
                 <button onclick="testWafAttack()" class="w-full py-2 px-4 rounded-lg bg-purple-600 hover:bg-purple-700 text-white font-medium transition duration-150 shadow-md">
-                    Test WAF Attack (SQL Injection attempt)
+                    Test WAF Attack (SQL Injection attempt on /register)
                 </button>
                 <button onclick="fetchLogs()" class="w-full py-2 px-4 rounded-lg bg-gray-600 hover:bg-gray-700 text-white font-medium transition duration-150 shadow-md">
-                    View Security Anomalies (Admin Only)
+                    View Security Anomalies (Public Endpoint)
                 </button>
             </div>
 
@@ -222,10 +230,10 @@
     async function handleRegister() {
         const username = document.getElementById('reg_username').value;
         const password = document.getElementById('reg_password').value;
-        
+        const email = document.getElementById('reg_email').value || 'placeholder@example.com'; // 🐛 FIX: Email must be included
+
         try {
-            // Note: The backend ignores the 'email' field you had in your original client UI
-            const data = await apiFetch('/register', 'POST', { username, password }); 
+            const data = await apiFetch('/register', 'POST', { username, password, email }); 
             showMessage(data.message, false);
             renderLoginUI();
         } catch (error) {
@@ -240,10 +248,10 @@
         try {
             const data = await apiFetch('/login', 'POST', { username, password });
 
-            // Backend returns 'test_mfa_code' on password success
-            if (data.test_mfa_code) {
+            // 🐛 FIX: Backend sends the code in 'mfa_code_for_demo'
+            if (data.mfa_code_for_demo) {
                 currentUsername = username;
-                const mfaCode = data.test_mfa_code; 
+                const mfaCode = data.mfa_code_for_demo; 
                 showMessage(data.message + '. Code generated.', false);
                 renderMFAUI(mfaCode);
             } else {
@@ -255,7 +263,6 @@
     }
 
     async function handleVerifyMFA() {
-        // The backend uses a 6-digit number, not a hex code, so we adapt the input.
         const otp_code = document.getElementById('otp_code').value; 
 
         if (!currentUsername || !otp_code) {
@@ -264,16 +271,14 @@
         }
 
         try {
-            const data = await apiFetch('/verify-mfa', 'POST', { username: currentUsername, mfa_code: otp_code });
+            // 🐛 FIX: Backend expects 'otp_code' in the body
+            const data = await apiFetch('/verify-mfa', 'POST', { username: currentUsername, otp_code: otp_code });
             
-            // Backend returns the full token string like "Bearer {token}"
-            currentToken = data.token; 
-            
-            // DANGER: We decode the UNSIGNED token ONLY to get the role for UI display.
-            // Never trust client-side decoding for security logic.
-            const tokenParts = currentToken.split(' ')[1].split('.'); 
-            const payloadStr = JSON.parse(currentToken.split(' ')[1]).payload;
-            currentUserRole = JSON.parse(payloadStr).role;
+            // 🐛 FIX: Backend sends the token in 'access_token' and role in 'role'
+            currentToken = data.access_token; 
+            currentUserRole = data.role; 
+
+            // NO NEED for client-side token decoding with the corrected backend response.
 
             renderDashboard();
         } catch (error) {
@@ -289,7 +294,8 @@
 
         try {
             const data = await apiFetch(endpoint, method, body, currentToken);
-            let message = `${data.message} ${data.report_data ? 'Data: ' + JSON.stringify(data.report_data) : ''} ${data.action_taken ? data.action_taken : ''}`;
+            // 🐛 FIX: Check data keys that your Flask backend sends on success
+            let message = `${data.message} ${data.data ? 'Data: ' + JSON.stringify(data.data) : ''}`;
             showMessage(message, false);
         } catch (error) {
             // This catches RBAC failures, Velocity Anomalies, and WAF blocks
@@ -300,22 +306,24 @@
     
     // --- NEW FUNCTION TO TEST WAF ---
     async function testWafAttack() {
-        const endpoint = '/data/admin-report'; // A protected POST route that checks WAF
+        // We will test the WAF decorator logic on the public '/register' route 
+        // to see if the Flask WAF decorator blocks it based on the malicious payload.
+        const endpoint = '/register'; 
         const body = { 
-            action: "UPDATE user SET password='hacked' WHERE 1=1 --" 
+            username: 'sqltest',
+            password: 'password',
+            email: "hacked@example.com' OR '1'='1" // SQL Injection attempt in email field
         };
 
-        if (!currentToken) {
-            showMessage('Error: Log in first to test the WAF decorator on protected routes.', true);
-            return;
-        }
-
         try {
+            // This call should fail if WAF is working
             const data = await apiFetch(endpoint, 'POST', body, currentToken);
             showMessage(`WAF Attack Test (Unexpected Success): ${data.message}`, true); 
         } catch (error) {
-            // We EXPECT this to fail with a 403 and the signature check message
+            // We EXPECT this to fail if the WAF catches the signature in the body
             if (error.message.includes('Malicious signature detected')) {
+                // 🐛 NOTE: Since the WAF is on a decorator, it's more common to test it on a protected route like /data/admin-report.
+                // However, since we don't have a POST body route, we test /register, but this assumes you've added the WAF decorator to /register.
                 showMessage(`✅ WAF Test Successful! Server blocked the request: **${error.message}**`, false);
             } else {
                 showMessage(`WAF Test Failed (Different Error): ${error.message}`, true);
@@ -326,20 +334,14 @@
 
 
     async function fetchLogs() {
-         if (!currentToken) {
-             showMessage('Error: Log in as admin to view anomaly logs.', true);
-             return;
-         }
-         
-        // The backend view_anomaly_logs route is limited to the 'admin' role
-        if (currentUserRole !== 'admin') {
-            showMessage('Error: Only users with the **admin** role can view security logs.', true);
-            return;
-        }
+        // 🐛 NOTE: Your Flask route /data/log-anomaly does NOT require a token (it's public)
+        // and it returns the log list directly, not under a 'logs' key.
 
         try {
-            const logData = await apiFetch('/data/log-anomaly', 'GET', null, currentToken);
-            const logs = logData.logs;
+            const logData = await apiFetch('/data/log-anomaly', 'GET', null, null); // 🐛 FIX: Removed currentToken
+            
+            // logData is now the list of logs
+            const logs = logData; 
             const logOutput = document.getElementById('log-output');
             
             if (logs && logs.length > 0) {
@@ -353,15 +355,16 @@
 
                     const escapedMessage = escapeHtml(log.message);
 
-                    return `<span class="${color}">[${time} | ${log.level} | ${log.event_type}]</span> ${escapedMessage} (IP: ${log.source_ip})`;
+                    // 🐛 FIX: Backend sends log_type, not event_type
+                    return `<span class="${color}">[${time} | ${log.level} | ${log.log_type}]</span> ${escapedMessage} (IP: ${log.source_ip})`;
                 }).join('\n');
                 
                 logOutput.innerHTML = formattedLogs;
             } else {
-                logOutput.textContent = 'No recent ALERT/CRITICAL log entries found.';
+                logOutput.textContent = 'No recent log entries found.';
             }
             
-            showMessage(logData.message, false);
+            showMessage('Security logs fetched successfully.', false); // 🐛 FIX: Message is not in the response body
         } catch (error) {
             showMessage(`Log Fetch Error: ${error.message}`, true);
         }
@@ -383,4 +386,4 @@
 
 </script>
 
-// --- End of UPDATED <script> block ---
+// --- End of CORRECTED <script> block ---
